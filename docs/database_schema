@@ -1,0 +1,1209 @@
+/////////////////////////////////////////////////////////
+// AI COMMUNICATION READINESS PLATFORM
+// FINAL BALANCED DATABASE DESIGN
+/////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////
+// 1. ORGANIZATION
+/////////////////////////////////////////////////////////
+
+Table institutions {
+  id uuid [pk]
+  name varchar
+  code varchar [unique]
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+Table departments {
+  id uuid [pk]
+  institution_id uuid [not null]
+  name varchar
+  code varchar
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (institution_id, code) [unique]
+  }
+}
+
+Table programs {
+  id uuid [pk]
+  institution_id uuid [not null]
+  name varchar
+  code varchar
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (institution_id, code) [unique]
+    (id, institution_id) [unique]
+  }
+}
+
+Table batches {
+  id uuid [pk]
+  program_id uuid [not null]
+  name varchar
+  year int
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (program_id, id) [unique]
+    (program_id, year) [unique]
+  }
+}
+
+
+// IMPORTANT:
+// subdivision is the domain-level grouping.
+// Examples: Full Stack, DevOps.
+// There is NO separate domains table.
+
+Table subdivisions {
+  id uuid [pk]
+  program_id uuid [not null]
+  name varchar
+  code varchar
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (program_id, id) [unique]
+    (program_id, code) [unique]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 2. USERS + RBAC
+/////////////////////////////////////////////////////////
+
+Table users {
+  id uuid [pk]
+  institution_id uuid [not null]
+  department_id uuid [null]
+  email varchar [unique]
+  password_hash varchar
+  first_name varchar
+  last_name varchar
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+Table roles {
+  id uuid [pk]
+  name varchar [unique]
+  description text
+  is_active boolean
+}
+
+Table permissions {
+  id uuid [pk]
+  name varchar [unique]
+  description text
+}
+
+Table role_permissions {
+  role_id uuid [not null]
+  permission_id uuid [not null]
+
+  Indexes {
+    (role_id, permission_id) [pk]
+  }
+}
+
+
+// Explicit scope assignment.
+// A role can be scoped to institution/program/subdivision/batch/
+// department/student depending on the permission.
+
+Table role_assignments {
+  id uuid [pk]
+
+  user_id uuid [not null]
+  role_id uuid [not null]
+
+  scope_type varchar
+  institution_id uuid [null]
+  program_id uuid [null]
+  subdivision_id uuid [null]
+  batch_id uuid [null]
+  department_id uuid [null]
+  student_id uuid [null]
+
+  starts_at timestamptz
+  ends_at timestamptz
+  is_active boolean
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 3. STUDENT
+/////////////////////////////////////////////////////////
+
+Table students {
+  id uuid [pk]
+  user_id uuid [not null, unique]
+
+  program_id uuid [not null]
+  batch_id uuid [not null]
+
+  subdivision_id uuid [null]
+  target_subdivision_id uuid [null]
+
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (program_id, batch_id)
+    (program_id, subdivision_id)
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 4. EXPLICIT RELATIONSHIPS
+/////////////////////////////////////////////////////////
+
+Table student_mentor_assignments {
+  id uuid [pk]
+
+  student_id uuid [not null]
+  mentor_user_id uuid [not null]
+
+  starts_at timestamptz
+  ends_at timestamptz
+  is_active boolean
+
+  assigned_by uuid [not null]
+  created_at timestamptz
+
+  Indexes {
+    (student_id, mentor_user_id)
+  }
+}
+
+
+Table trainer_subdivision_assignments {
+  id uuid [pk]
+
+  trainer_user_id uuid [not null]
+  subdivision_id uuid [not null]
+
+  starts_at timestamptz
+  ends_at timestamptz
+  is_active boolean
+
+  assigned_by uuid [not null]
+  created_at timestamptz
+
+  Indexes {
+    (trainer_user_id, subdivision_id)
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 5. SKILLS
+/////////////////////////////////////////////////////////
+
+Table skills {
+  id uuid [pk]
+  name varchar
+  category varchar
+  description text
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (category, name) [unique]
+  }
+}
+
+Table student_skills {
+  student_id uuid [not null]
+  skill_id uuid [not null]
+
+  proficiency_score numeric
+  source varchar
+  updated_at timestamptz
+
+  Indexes {
+    (student_id, skill_id) [pk]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 6. RESUME
+/////////////////////////////////////////////////////////
+
+Table resumes {
+  id uuid [pk]
+
+  student_id uuid [not null]
+
+  version int
+  object_key varchar
+  file_name varchar
+  parsed_text text [null]
+  parsed_data jsonb [null]
+
+  is_current boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (student_id, version) [unique]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 7. ASSESSMENTS
+/////////////////////////////////////////////////////////
+
+Table assessments {
+  id uuid [pk]
+
+  name varchar
+  assessment_type varchar
+  interview_type varchar [null]
+
+  version int
+  description text
+
+  is_active boolean
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (id, version) [unique]
+  }
+}
+
+
+Table assessment_components {
+  id uuid [pk]
+
+  assessment_id uuid [not null]
+
+  component_type varchar
+  name varchar
+
+  weight numeric
+  configuration jsonb
+
+  is_active boolean
+  created_at timestamptz
+
+  Indexes {
+    (assessment_id, component_type) [unique]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 8. ASSESSMENT ATTEMPTS
+/////////////////////////////////////////////////////////
+
+Table assessment_attempts {
+  id uuid [pk]
+
+  assessment_id uuid [not null]
+  student_id uuid [not null]
+
+  interview_type varchar
+  conducted_event_key varchar [null]
+
+  // Immutable organization snapshot
+  program_id uuid [not null]
+  batch_id uuid [not null]
+  subdivision_id uuid [null]
+
+  assessment_version int
+  scoring_version varchar
+
+  configuration_snapshot jsonb
+  credit_policy_snapshot jsonb
+
+  status varchar
+
+  started_at timestamptz
+  completed_at timestamptz
+  created_at timestamptz
+
+  Indexes {
+    (student_id, assessment_id)
+    (student_id, status)
+    (program_id, batch_id, subdivision_id)
+    (student_id, conducted_event_key)
+  }
+}
+
+
+// Runtime interview/session state.
+// Redis may be used for ephemeral state, but PostgreSQL remains authoritative.
+
+Table assessment_sessions {
+  id uuid [pk]
+
+  attempt_id uuid [not null, unique]
+
+  current_sequence_no int
+  state varchar
+  state_data jsonb
+
+  last_activity_at timestamptz
+  expires_at timestamptz
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 9. QUESTION BANK + PGVECTOR
+/////////////////////////////////////////////////////////
+
+Table question_bank_items {
+  id uuid [pk]
+
+  question_text text
+
+  difficulty varchar
+
+  evaluation_criteria jsonb
+  metadata jsonb
+
+  // pgvector
+  embedding vector
+  embedding_model varchar [null]
+  embedding_version int [null]
+  content_hash varchar [null]
+  embedded_at timestamptz [null]
+
+  is_generated boolean
+  is_active boolean
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+// Allows a question to belong to multiple skills.
+
+Table question_bank_item_skills {
+  question_bank_item_id uuid [not null]
+  skill_id uuid [not null]
+
+  is_primary boolean
+
+  Indexes {
+    (question_bank_item_id, skill_id) [pk]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 10. QUESTIONS USED IN AN ATTEMPT
+/////////////////////////////////////////////////////////
+
+Table questions {
+  id uuid [pk]
+
+  attempt_id uuid [not null]
+
+  question_bank_item_id uuid [null]
+  listening_story_id uuid [null]
+
+  question_type varchar
+
+  sequence_no int
+
+  question_text text
+  difficulty varchar
+
+  primary_skill_id uuid [null]
+
+  evaluation_criteria jsonb
+
+  question_version int
+
+  is_generated boolean
+
+  created_at timestamptz
+
+  Indexes {
+    (attempt_id, sequence_no) [unique]
+    (attempt_id, id) [unique]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 11. RESPONSES
+/////////////////////////////////////////////////////////
+
+Table responses {
+  id uuid [pk]
+
+  attempt_id uuid [not null]
+  question_id uuid [not null]
+
+  input_type varchar
+
+  text_answer text
+  transcript text [null]
+
+  idempotency_key varchar [not null]
+
+  submitted_at timestamptz
+  created_at timestamptz
+
+  Indexes {
+    (idempotency_key) [unique]
+    (attempt_id, question_id) [unique]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 12. AI EXECUTION
+/////////////////////////////////////////////////////////
+
+Table ai_runs {
+  id uuid [pk]
+
+  response_id uuid [null]
+
+  capability varchar
+  provider varchar
+  model varchar
+
+  prompt_version varchar
+
+  input_hash varchar [null]
+
+  request_metadata jsonb
+  response_metadata jsonb
+
+  status varchar
+
+  latency_ms int
+  token_usage jsonb [null]
+
+  error_code varchar [null]
+  error_message text [null]
+
+  created_at timestamptz
+  completed_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 13. RESPONSE EVALUATION
+/////////////////////////////////////////////////////////
+
+Table response_evaluations {
+  id uuid [pk]
+
+  response_id uuid [not null, unique]
+  ai_run_id uuid [not null]
+
+  technical_score numeric [null]
+  communication_score numeric [null]
+  listening_score numeric [null]
+
+  confidence numeric
+
+  strengths jsonb
+  weaknesses jsonb
+  feedback text
+
+  dimension_scores jsonb
+  communication_metrics jsonb
+  listening_metrics jsonb
+
+  evaluation_version varchar
+
+  created_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 14. REPORTS
+/////////////////////////////////////////////////////////
+
+Table assessment_reports {
+  id uuid [pk]
+
+  attempt_id uuid [not null, unique]
+  student_id uuid [not null]
+
+  assessment_version int
+  scoring_version varchar
+
+  technical_score numeric
+  communication_score numeric
+  listening_score numeric
+  overall_score numeric
+
+  component_scores jsonb
+  skill_scores jsonb
+
+  strengths jsonb
+  weaknesses jsonb
+  feedback text
+
+  recommendations_snapshot jsonb
+
+  created_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 15. PERFORMANCE
+/////////////////////////////////////////////////////////
+
+Table performance_profiles {
+  id uuid [pk]
+
+  student_id uuid [not null, unique]
+
+  technical_score numeric
+  communication_score numeric
+  listening_score numeric
+  overall_score numeric
+
+  previous_overall_score numeric [null]
+
+  trend varchar [null]
+
+  updated_at timestamptz
+}
+
+
+Table performance_snapshots {
+  id uuid [pk]
+
+  student_id uuid [not null]
+  attempt_id uuid [not null]
+
+  program_id uuid [not null]
+  batch_id uuid [not null]
+  subdivision_id uuid [null]
+
+  technical_score numeric
+  communication_score numeric
+  listening_score numeric
+  overall_score numeric
+
+  component_scores jsonb
+  skill_scores jsonb
+
+  captured_at timestamptz
+
+  Indexes {
+    (student_id, captured_at)
+    (program_id, batch_id, subdivision_id)
+  }
+}
+
+
+Table skill_performances {
+  id uuid [pk]
+
+  student_id uuid [not null]
+  skill_id uuid [not null]
+  attempt_id uuid [null]
+
+  score numeric
+  proficiency_level varchar
+
+  source varchar
+
+  measured_at timestamptz
+
+  Indexes {
+    (student_id, skill_id, measured_at)
+    (skill_id, measured_at)
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 16. LEARNING
+/////////////////////////////////////////////////////////
+
+Table learning_plans {
+  id uuid [pk]
+
+  student_id uuid [not null]
+
+  generated_by_agent_run_id uuid [null]
+
+  goal text
+  plan_data jsonb
+
+  status varchar
+
+  version int
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+Table learning_recommendations {
+  id uuid [pk]
+
+  student_id uuid [not null]
+
+  learning_plan_id uuid [null]
+  source_attempt_id uuid [null]
+
+  skill_id uuid [null]
+
+  recommendation_type varchar
+  title varchar
+  description text
+
+  priority int
+
+  evidence jsonb
+
+  status varchar
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 17. LISTENING
+/////////////////////////////////////////////////////////
+
+Table listening_stories {
+  id uuid [pk]
+
+  title varchar
+  content text
+
+  difficulty varchar
+
+  source_type varchar
+  metadata jsonb
+
+  is_active boolean
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 18. CREDITS
+/////////////////////////////////////////////////////////
+
+Table credit_accounts {
+  id uuid [pk]
+
+  student_id uuid [not null, unique]
+
+  balance numeric
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+Table credit_transactions {
+  id uuid [pk]
+
+  account_id uuid [not null]
+  student_id uuid [not null]
+
+  transaction_type varchar
+  amount numeric
+
+  balance_after numeric
+
+  idempotency_key varchar [not null]
+
+  reference_type varchar [null]
+  reference_id uuid [null]
+
+  metadata jsonb
+
+  created_at timestamptz
+
+  Indexes {
+    (idempotency_key) [unique]
+    (student_id, created_at)
+  }
+}
+
+
+Table credit_policies {
+  id uuid [pk]
+
+  scope_type varchar
+
+  institution_id uuid [null]
+  program_id uuid [null]
+  subdivision_id uuid [null]
+  student_id uuid [null]
+
+  initial_credit_amount numeric
+  consume_amount numeric
+  reward_ceiling numeric
+  max_balance numeric [null]
+
+  self_practice_enabled boolean
+  conducted_attempt_policy jsonb
+
+  is_active boolean
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+/////////////////////////////////////////////////////////
+// 19. KNOWLEDGE / RAG
+/////////////////////////////////////////////////////////
+
+Table knowledge_documents {
+  id uuid [pk]
+
+  title varchar
+  source_type varchar
+  source_url varchar [null]
+
+  visibility_type varchar
+
+  institution_id uuid [null]
+  program_id uuid [null]
+  subdivision_id uuid [null]
+
+  metadata jsonb
+
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+
+Table knowledge_chunks {
+  id uuid [pk]
+
+  document_id uuid [not null]
+
+  chunk_index int
+  chunk_text text
+
+  embedding vector
+  embedding_model varchar
+  embedding_version int
+
+  source_metadata jsonb
+
+  created_at timestamptz
+
+  Indexes {
+    (document_id, chunk_index) [unique]
+  }
+}
+
+
+/////////////////////////////////////////////////////////
+// 20. BOUNDED AGENT
+/////////////////////////////////////////////////////////
+
+Table agent_definitions {
+  id uuid [pk]
+
+  name varchar
+  version int
+
+  goal text
+
+  // Typed tool definitions:
+  // input schema + output schema + permissions
+  tools jsonb
+
+  guardrails jsonb
+  prohibited_actions jsonb
+  termination_conditions jsonb
+
+  max_steps int
+  max_tool_calls int
+  max_retries int
+  timeout_seconds int
+
+  is_active boolean
+
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (name, version) [unique]
+  }
+}
+
+
+Table agent_runs {
+  id uuid [pk]
+
+  agent_definition_id uuid [not null]
+
+  student_id uuid [not null]
+  triggered_by_user_id uuid [null]
+
+  status varchar
+
+  goal_snapshot text
+  termination_reason varchar [null]
+
+  correlation_id varchar
+
+  started_at timestamptz
+  completed_at timestamptz
+
+  created_at timestamptz
+}
+
+
+Table agent_steps {
+  id uuid [pk]
+
+  agent_run_id uuid [not null]
+
+  sequence_no int
+
+  step_type varchar
+  // TOOL | LLM | DECISION
+
+  tool_name varchar [null]
+
+  input jsonb
+  output jsonb
+
+  status varchar
+
+  error_code varchar [null]
+  error_message text [null]
+
+  duration_ms int
+
+  created_at timestamptz
+
+  Indexes {
+    (agent_run_id, sequence_no) [unique]
+  }
+}
+
+
+// NO agent_approvals table.
+// No human approval workflow.
+
+
+/////////////////////////////////////////////////////////
+// 21. AUDIT + OUTBOX
+/////////////////////////////////////////////////////////
+
+Table audit_logs {
+  id uuid [pk]
+
+  actor_user_id uuid [null]
+
+  action varchar
+  resource_type varchar
+  resource_id uuid [null]
+
+  scope_type varchar [null]
+
+  before_data jsonb [null]
+  after_data jsonb [null]
+
+  correlation_id varchar [null]
+
+  created_at timestamptz
+
+  Indexes {
+    (actor_user_id, created_at)
+    (resource_type, resource_id)
+    (created_at)
+  }
+}
+
+
+Table outbox_events {
+  id uuid [pk]
+
+  aggregate_type varchar
+  aggregate_id uuid
+
+  event_type varchar
+
+  dedupe_key varchar [not null]
+
+  payload jsonb
+
+  status varchar
+  attempts int
+
+  available_at timestamptz
+  published_at timestamptz [null]
+
+  last_error text [null]
+
+  created_at timestamptz
+
+  Indexes {
+    (dedupe_key) [unique]
+    (status, available_at)
+  }
+}
+
+/////////////////////////////////////////////////////////
+// 22. PLACEMENT READINESS / MENTOR VERIFICATION
+/////////////////////////////////////////////////////////
+
+Table checklist_items {
+  id uuid [pk]
+
+  program_id uuid [not null]
+  subdivision_id uuid [null]
+
+  name varchar
+  description text
+
+  category varchar
+
+  max_score numeric
+  weight numeric
+
+  is_required boolean
+  is_active boolean
+
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (program_id, subdivision_id)
+    (program_id, name) [unique]
+  }
+}
+
+
+Table checklist_progress {
+  id uuid [pk]
+
+  student_id uuid [not null]
+  checklist_item_id uuid [not null]
+
+  status varchar
+  // PENDING | IN_PROGRESS | COMPLETED | FAILED
+
+  score numeric
+  max_score numeric
+
+  completed_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (student_id, checklist_item_id) [unique]
+    (student_id, status)
+  }
+}
+
+
+Table mentor_verifications {
+  id uuid [pk]
+
+  student_id uuid [not null]
+  mentor_user_id uuid [not null]
+
+  verification_type varchar
+  // PROFILE | CHECKLIST
+
+  checklist_progress_id uuid [null]
+
+  status varchar
+  // VERIFIED | REJECTED | PENDING
+
+  notes text
+
+  verified_at timestamptz
+  created_at timestamptz
+  updated_at timestamptz
+
+  Indexes {
+    (student_id, verification_type)
+    (mentor_user_id, student_id)
+    (checklist_progress_id)
+  }
+}
+
+
+Table placement_eligibility {
+  id uuid [pk]
+
+  student_id uuid [not null, unique]
+
+  total_score numeric
+  maximum_score numeric
+  threshold_score numeric
+
+  is_eligible boolean
+
+  evaluated_at timestamptz
+  updated_at timestamptz
+
+  reason text
+}
+
+
+/////////////////////////////////////////////////////////
+// RELATIONSHIPS
+/////////////////////////////////////////////////////////
+
+Ref: departments.institution_id > institutions.id
+
+Ref: programs.institution_id > institutions.id
+Ref: batches.program_id > programs.id
+Ref: subdivisions.program_id > programs.id
+
+Ref: users.institution_id > institutions.id
+Ref: users.department_id > departments.id
+
+Ref: role_permissions.role_id > roles.id
+Ref: role_permissions.permission_id > permissions.id
+
+Ref: role_assignments.user_id > users.id
+Ref: role_assignments.role_id > roles.id
+
+Ref: role_assignments.institution_id > institutions.id
+Ref: role_assignments.program_id > programs.id
+Ref: role_assignments.subdivision_id > subdivisions.id
+Ref: role_assignments.batch_id > batches.id
+Ref: role_assignments.department_id > departments.id
+Ref: role_assignments.student_id > students.id
+
+Ref: students.user_id > users.id
+Ref: students.program_id > programs.id
+Ref: students.batch_id > batches.id
+Ref: students.subdivision_id > subdivisions.id
+Ref: students.target_subdivision_id > subdivisions.id
+
+Ref: student_mentor_assignments.student_id > students.id
+Ref: student_mentor_assignments.mentor_user_id > users.id
+Ref: student_mentor_assignments.assigned_by > users.id
+
+Ref: trainer_subdivision_assignments.trainer_user_id > users.id
+Ref: trainer_subdivision_assignments.subdivision_id > subdivisions.id
+Ref: trainer_subdivision_assignments.assigned_by > users.id
+
+Ref: student_skills.student_id > students.id
+Ref: student_skills.skill_id > skills.id
+
+Ref: resumes.student_id > students.id
+
+Ref: assessment_components.assessment_id > assessments.id
+
+Ref: assessment_attempts.assessment_id > assessments.id
+Ref: assessment_attempts.student_id > students.id
+Ref: assessment_attempts.program_id > programs.id
+Ref: assessment_attempts.batch_id > batches.id
+Ref: assessment_attempts.subdivision_id > subdivisions.id
+
+Ref: assessment_sessions.attempt_id > assessment_attempts.id
+
+Ref: question_bank_item_skills.question_bank_item_id > question_bank_items.id
+Ref: question_bank_item_skills.skill_id > skills.id
+
+Ref: questions.attempt_id > assessment_attempts.id
+Ref: questions.question_bank_item_id > question_bank_items.id
+Ref: questions.listening_story_id > listening_stories.id
+Ref: questions.primary_skill_id > skills.id
+
+Ref: responses.attempt_id > assessment_attempts.id
+Ref: responses.question_id > questions.id
+
+Ref: ai_runs.response_id > responses.id
+
+Ref: response_evaluations.response_id > responses.id
+Ref: response_evaluations.ai_run_id > ai_runs.id
+
+Ref: assessment_reports.attempt_id > assessment_attempts.id
+Ref: assessment_reports.student_id > students.id
+
+Ref: performance_profiles.student_id > students.id
+
+Ref: performance_snapshots.student_id > students.id
+Ref: performance_snapshots.attempt_id > assessment_attempts.id
+Ref: performance_snapshots.program_id > programs.id
+Ref: performance_snapshots.batch_id > batches.id
+Ref: performance_snapshots.subdivision_id > subdivisions.id
+
+Ref: skill_performances.student_id > students.id
+Ref: skill_performances.skill_id > skills.id
+Ref: skill_performances.attempt_id > assessment_attempts.id
+
+Ref: learning_plans.student_id > students.id
+Ref: learning_plans.generated_by_agent_run_id > agent_runs.id
+
+Ref: learning_recommendations.student_id > students.id
+Ref: learning_recommendations.learning_plan_id > learning_plans.id
+Ref: learning_recommendations.source_attempt_id > assessment_attempts.id
+Ref: learning_recommendations.skill_id > skills.id
+
+Ref: credit_accounts.student_id > students.id
+
+Ref: credit_transactions.account_id > credit_accounts.id
+Ref: credit_transactions.student_id > students.id
+
+Ref: credit_policies.institution_id > institutions.id
+Ref: credit_policies.program_id > programs.id
+Ref: credit_policies.subdivision_id > subdivisions.id
+Ref: credit_policies.student_id > students.id
+
+Ref: checklist_items.program_id > programs.id
+Ref: checklist_items.subdivision_id > subdivisions.id
+
+Ref: checklist_progress.student_id > students.id
+Ref: checklist_progress.checklist_item_id > checklist_items.id
+
+Ref: mentor_verifications.student_id > students.id
+Ref: mentor_verifications.mentor_user_id > users.id
+Ref: mentor_verifications.checklist_progress_id > checklist_progress.id
+
+Ref: placement_eligibility.student_id > students.id
+
+Ref: knowledge_documents.institution_id > institutions.id
+Ref: knowledge_documents.program_id > programs.id
+Ref: knowledge_documents.subdivision_id > subdivisions.id
+
+Ref: knowledge_chunks.document_id > knowledge_documents.id
+
+Ref: agent_runs.agent_definition_id > agent_definitions.id
+Ref: agent_runs.student_id > students.id
+Ref: agent_runs.triggered_by_user_id > users.id
+
+Ref: agent_steps.agent_run_id > agent_runs.id
+
+Ref: audit_logs.actor_user_id > users.id
