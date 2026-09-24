@@ -47,31 +47,32 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
   }
   const { name, email, password, rollNumber, batchId, subdivisionId } = parsed.data;
 
+  const client = await db.connect();
   try {
-    const { rows: batchRows } = await db.query('SELECT id FROM org.batches WHERE id = $1', [batchId]);
+    const { rows: batchRows } = await client.query('SELECT id FROM org.batches WHERE id = $1', [batchId]);
     if (batchRows.length === 0) {
       throw new AppError(404, 'Batch not found', 'NOT_FOUND');
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    await db.query('BEGIN');
+    await client.query('BEGIN');
     try {
-      const { rows: userRows } = await db.query<{ id: string }>(
+      const { rows: userRows } = await client.query<{ id: string }>(
         `INSERT INTO identity.users (name, email, password_hash, role, token_version, status)
          VALUES ($1, $2, $3, 'STUDENT', 0, 'ACTIVE') RETURNING id`,
         [name, email, passwordHash]
       );
       const userId = userRows[0].id;
 
-      const { rows: studentRows } = await db.query<{ id: string }>(
+      const { rows: studentRows } = await client.query<{ id: string }>(
         `INSERT INTO org.students (user_id, roll_number, batch_id, subdivision_id, coding_handles)
          VALUES ($1, $2, $3, $4, '{}') RETURNING id`,
         [userId, rollNumber, batchId, subdivisionId ?? null]
       );
       const studentId = studentRows[0].id;
 
-      await db.query('COMMIT');
+      await client.query('COMMIT');
 
       const authUser: AuthUser = { id: userId, email, role: 'STUDENT', name, tokenVersion: 0 };
       const token = signToken(authUser);
@@ -81,7 +82,7 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
 
       sendSuccess(res, { token, user: { id: userId, name, email, role: 'STUDENT' }, studentId }, 201);
     } catch (innerErr) {
-      await db.query('ROLLBACK');
+      await client.query('ROLLBACK');
       throw innerErr;
     }
   } catch (err) {
@@ -91,6 +92,8 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
       return;
     }
     sendError(res, err);
+  } finally {
+    client.release();
   }
 });
 
@@ -119,8 +122,12 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
       [email]
     );
 
-    // Always same message — never confirm whether email exists
-    if (rows.length === 0 || !(await bcrypt.compare(password, rows[0].password_hash))) {
+    // Always run bcrypt regardless of whether the email exists — prevents timing-based
+    // user enumeration (a found email would otherwise be ~100ms slower than a missing one).
+    const DUMMY_HASH = '$2a$10$invalidhashpadding..................................';
+    const hashToCheck = rows.length > 0 ? rows[0].password_hash : DUMMY_HASH;
+    const passwordMatch = await bcrypt.compare(password, hashToCheck);
+    if (rows.length === 0 || !passwordMatch) {
       throw new AppError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
     }
 

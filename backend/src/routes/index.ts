@@ -16,11 +16,13 @@ export const router = Router();
 router.use('/health', healthRouter);
 router.use('/auth', authRouter);
 
+// Org lookup endpoints are read-only and needed before login (e.g. batch list on registration form).
+router.use('/org', orgRouter);
+
 // Protected — authenticate on every request; individual routes add authorize() as needed
 router.use('/students', authenticate, studentRouter);
 router.use('/sessions', authenticate, interviewRouter);
 router.use('/portals', authenticate, portalRouter);
-router.use('/org', authenticate, orgRouter);
 router.use('/mentors', authenticate, mentorRouter);
 router.use('/trainers', authenticate, trainerRouter);
 router.use('/admin', authenticate, adminRouter);

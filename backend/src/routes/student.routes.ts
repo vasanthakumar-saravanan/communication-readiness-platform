@@ -71,12 +71,13 @@ const patchStudentSchema = z.object({
 
 studentRouter.patch(
   '/:studentId',
+  requireStudentSelfOrStaff,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { studentId } = req.params;
       const user = req.user!;
 
-      // Fetch student to verify ownership
+      // Fetch student to verify ownership for STUDENT role
       const { rows: existing } = await db.query(
         'SELECT id, user_id, coding_handles FROM org.students WHERE id = $1',
         [studentId]
@@ -84,9 +85,6 @@ studentRouter.patch(
       if (existing.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
 
       if (user.role === 'STUDENT' && existing[0].user_id !== user.id) {
-        throw new AppError(403, 'Access denied', 'FORBIDDEN');
-      }
-      if (!['STUDENT', 'PROGRAM_ADMIN'].includes(user.role)) {
         throw new AppError(403, 'Access denied', 'FORBIDDEN');
       }
 

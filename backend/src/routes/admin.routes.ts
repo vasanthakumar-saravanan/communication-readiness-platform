@@ -5,17 +5,8 @@ import { AppError } from '../shared/errors/AppError';
 import { sendSuccess, sendError } from '../shared/helpers/response';
 import { AuthRequest } from '../middleware/authenticate';
 import { requireRole } from '../middleware/authorize';
-import { UserRole } from '../shared/types/roles';
 
 export const adminRouter = Router();
-
-const VALID_ROLES: UserRole[] = [
-  'STUDENT',
-  'FACULTY_MENTOR',
-  'PROGRAM_ADMIN',
-  'TRAINER',
-  'PLACEMENT_COORDINATOR',
-];
 
 const VALID_STATUSES = ['ACTIVE', 'INACTIVE', 'SUSPENDED'] as const;
 
@@ -61,6 +52,13 @@ adminRouter.patch(
       const { userId } = req.params;
       const parsed = roleSchema.safeParse(req.body);
       if (!parsed.success) throw new AppError(422, 'Invalid role value', 'VALIDATION_ERROR');
+
+      // Prevent any PROGRAM_ADMIN from granting PROGRAM_ADMIN to another user.
+      // Full cross-institution scoping is a post-MVP item; this guard prevents the most
+      // dangerous privilege-escalation path (creating peer admins without oversight).
+      if (parsed.data.role === 'PROGRAM_ADMIN') {
+        throw new AppError(403, 'Cannot grant PROGRAM_ADMIN role via this endpoint', 'FORBIDDEN');
+      }
 
       const { rows } = await db.query(
         `UPDATE identity.users

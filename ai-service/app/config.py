@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = ""
+    # Shared secret required by POST /ai/config — set to a strong random string in production
+    internal_api_key: str = "change-me"
 
     class Config:
         env_file = ".env"

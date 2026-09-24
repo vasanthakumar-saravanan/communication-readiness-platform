@@ -42,21 +42,32 @@ mentorRouter.post(
       );
       if (student.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
 
-      // Deactivate existing active assignment
-      await db.query(
-        `UPDATE org.student_mentor_assignments SET is_active = false
-         WHERE student_id = $1 AND is_active = true`,
-        [studentId]
-      );
+      // Deactivate + insert must be atomic — a crash between them would leave the student
+      // with no active mentor, breaking all subsequent mentor-scoped operations.
+      const client = await db.connect();
+      let assignmentId: string;
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE org.student_mentor_assignments SET is_active = false
+           WHERE student_id = $1 AND is_active = true`,
+          [studentId]
+        );
+        const { rows } = await client.query<{ id: string }>(
+          `INSERT INTO org.student_mentor_assignments (student_id, mentor_id, assigned_by, is_active)
+           VALUES ($1, $2, $3, true) RETURNING id`,
+          [studentId, mentorId, assignedBy]
+        );
+        await client.query('COMMIT');
+        assignmentId = rows[0].id;
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
 
-      // Create new assignment
-      const { rows } = await db.query(
-        `INSERT INTO org.student_mentor_assignments (student_id, mentor_id, assigned_by, is_active)
-         VALUES ($1, $2, $3, true) RETURNING id`,
-        [studentId, mentorId, assignedBy]
-      );
-
-      sendSuccess(res, { assignment: { id: rows[0].id, studentId, mentorId } }, 201);
+      sendSuccess(res, { assignment: { id: assignmentId, studentId, mentorId } }, 201);
     } catch (err) {
       sendError(res, err);
     }

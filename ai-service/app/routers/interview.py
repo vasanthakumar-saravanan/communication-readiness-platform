@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 from app.models.schemas import (
     ConfigUpdateRequest,
@@ -14,6 +14,7 @@ from app.models.schemas import (
     TurnEvaluationRequest,
     TurnEvaluationResponse,
 )
+from app.config import settings
 from app.services.llm_client import get_llm_client, update_llm_config
 
 router = APIRouter(prefix="/ai", tags=["interview"])
@@ -95,7 +96,13 @@ def evaluate_listening(req: ListeningEvaluationRequest) -> ListeningEvaluationRe
 
 
 @router.post("/config", response_model=ConfigUpdateResponse)
-def update_config(req: ConfigUpdateRequest) -> ConfigUpdateResponse:
+def update_config(
+    req: ConfigUpdateRequest,
+    x_internal_key: str | None = Header(default=None),
+) -> ConfigUpdateResponse:
+    # Guard: require the shared secret so arbitrary callers cannot replace the LLM key.
+    if x_internal_key != settings.internal_api_key:
+        raise HTTPException(status_code=403, detail="Missing or invalid X-Internal-Key")
     active = update_llm_config(
         provider=req.llm_provider,
         base_url=req.llm_base_url,

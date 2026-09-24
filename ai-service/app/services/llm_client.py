@@ -111,7 +111,18 @@ def update_llm_config(
     api_key: str | None = None,
     model: str | None = None,
 ) -> str:
-    """Rebuild the singleton at runtime — called by POST /ai/config."""
+    """Rebuild the singleton at runtime — called by POST /ai/config.
+
+    MULTI-WORKER LIMITATION: This function mutates os.environ and the module-level
+    _client singleton in the current process only. Under a multi-worker Uvicorn
+    deployment (--workers N, N > 1) each worker has its own copy of os.environ and
+    _client, so POST /ai/config updates only the worker that handles the request;
+    other workers continue using their previous configuration non-deterministically.
+
+    For /ai/config to work reliably, run with --workers 1 (the default in development).
+    A shared-state solution (e.g. Redis-backed config) is required before multi-worker
+    production deployment.
+    """
     global _client
     if provider is not None:
         os.environ["LLM_PROVIDER"] = provider
