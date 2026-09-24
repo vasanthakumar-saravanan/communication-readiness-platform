@@ -1,0 +1,11 @@
+CREATE INDEX idx_students_user_id        ON org.students (user_id);
+CREATE INDEX idx_students_roll_number    ON org.students (roll_number);
+CREATE INDEX idx_students_batch_id       ON org.students (batch_id);
+CREATE INDEX idx_students_subdivision    ON org.students (subdivision_id);
+CREATE INDEX idx_programs_institution    ON org.programs (institution_id);
+CREATE INDEX idx_batches_program         ON org.batches (program_id);
+CREATE INDEX idx_subdivisions_batch      ON org.subdivisions (batch_id);
+CREATE INDEX idx_trainer_assign_trainer  ON org.trainer_subdivision_assignments (trainer_id);
+CREATE INDEX idx_trainer_assign_sub      ON org.trainer_subdivision_assignments (subdivision_id);
+CREATE INDEX idx_mentor_assign_student   ON org.student_mentor_assignments (student_id);
+CREATE INDEX idx_mentor_assign_mentor    ON org.student_mentor_assignments (mentor_id);

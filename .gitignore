@@ -1,24 +1,45 @@
 node_modules/
 backend/node_modules/
 frontend/node_modules/
+communication-readiness-platform/backend/node_modules/
 dist/
 backend/dist/
 frontend/dist/
+communication-readiness-platform/backend/dist/
+
+# Python
 __pycache__/
-*/__pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ai-service/.venv/
+ai-service/venv/
+*.egg-info/
+.pytest_cache/
+
 .env
 .env.*
 backend/.env
 backend/.env.*
 frontend/.env
 frontend/.env.*
+communication-readiness-platform/backend/.env
+communication-readiness-platform/backend/.env.*
 !.env.example
 !backend/.env.example
+!communication-readiness-platform/backend/.env.example
 
 *.log
 uploads/
 backend/uploads/
+communication-readiness-platform/backend/uploads/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Local reference files (not pushed)
 CLAUDE.md

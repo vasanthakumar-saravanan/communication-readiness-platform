@@ -1,0 +1,13 @@
+export type UserRole =
+  | 'STUDENT'
+  | 'FACULTY_MENTOR'
+  | 'PROGRAM_ADMIN'
+  | 'TRAINER'
+  | 'PLACEMENT_COORDINATOR';
+
+export const STAFF_ROLES: UserRole[] = [
+  'FACULTY_MENTOR',
+  'PROGRAM_ADMIN',
+  'TRAINER',
+  'PLACEMENT_COORDINATOR',
+];
