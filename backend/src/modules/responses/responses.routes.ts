@@ -1,3 +1,24 @@
+/*
+BUG: POST /submit returns AI evaluation (scores, feedback, strengths, weaknesses) to the student immediately after each answer.
+This is an interview platform — showing evaluation mid-interview lets the student adjust their approach for the next question,
+which defeats the purpose. Evaluation should only be visible after the full assessment is complete (via the report).
+
+Handles student answer submission, AI evaluation, and adaptive next-question generation. This is the core "answer → score → next question" loop.
+
+POST /api/responses/submit — Student submits their answer to a question. Does this in order:
+Verifies the student owns the attempt, it's IN_PROGRESS, the question belongs to the attempt, and the session is ACTIVE.
+Idempotency check: if the same idempotencyKey was already used, returns the existing evaluation instead of re-processing.
+Saves the response (transcript + input type) to evaluation.responses.
+Creates a PENDING ai_runs record, then calls FastAPI for evaluation.
+If AI is unreachable: marks ai_run as FAILED, returns 503 but the response is still saved.
+If AI succeeds: saves scores, feedback, strengths/weaknesses to evaluation.response_evaluations.
+Adaptive difficulty: if techScore >= 80 → increase difficulty one step; if < 50 → decrease one step.
+Picks the next question from the bank at the new difficulty (excluding already-used questions). If the max questions per session is reached, returns nextQuestion: null.
+Updates session.current_sequence_no and returns the evaluation + next question.
+
+GET /api/responses/:id — View a single response and its evaluation.
+Students see only their own. Mentors see only their assigned students'. Admins see all.
+*/
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';

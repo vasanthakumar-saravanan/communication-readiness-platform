@@ -1,3 +1,14 @@
+/*
+Manages the pool of interview questions that get pulled from during assessments.
+
+GET /api/question-bank — Lists all active questions, along with any skill tags attached to each one. Only FACULTY_MENTOR, TRAINER, PROGRAM_ADMIN, PLACEMENT_COORDINATOR can view.
+POST /api/question-bank — Adds a new question. Can optionally attach it to one or more skills (skillIds). Uses a database transaction (BEGIN/COMMIT/ROLLBACK) so the question and its skill tags either both save successfully or neither does. Restricted to FACULTY_MENTOR, TRAINER, PROGRAM_ADMIN.
+PUT /api/question-bank/:id — Edits an existing question's text, difficulty, evaluation criteria, or metadata. Only updates fields that were actually sent (partial update). Same 3 roles as above.
+DELETE /api/question-bank/:id — Soft-delete: just sets is_active = false, doesn't actually remove the row from the database. Restricted to PROGRAM_ADMIN, PLACEMENT_COORDINATOR only.
+
+In one line: this file is the admin panel for the question bank — read access for mentors/trainers, write access for content creators, and delete access locked to admins only.
+*/
+
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { db } from '../../shared/db/pool';

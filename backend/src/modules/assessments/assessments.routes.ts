@@ -1,3 +1,37 @@
+/*
+Setup
+
+Two validation schemas (createSchema, updateSchema) using Zod — they check that incoming data has the right shape before touching the database. E.g. name must be a non-empty string under 255 chars.
+
+GET /api/assessments
+
+Anyone logged in can call this.
+Runs a SQL query to fetch all assessments where is_active = true, newest first.
+Returns the list.
+
+POST /api/assessments
+
+Only PROGRAM_ADMIN or PLACEMENT_COORDINATOR can call this.
+Validates the request body against createSchema — rejects with 422 if invalid.
+Inserts a new row into assessment.assessments.
+Returns the newly created assessment with status 201 (created).
+
+GET /api/assessments/:id
+
+Anyone logged in can call this.
+Fetches one assessment by ID, and also joins in its "components" (sub-parts, like question sections) using json_agg.
+If no components exist, returns an empty array [] instead of null.
+If the assessment doesn't exist, throws a 404.
+
+PUT /api/assessments/:id
+
+Only PROGRAM_ADMIN or PLACEMENT_COORDINATOR can call this.
+Validates body against updateSchema (all fields optional — partial update).
+Checks the assessment exists first (404 if not).
+Dynamically builds the UPDATE query — only touches fields that were actually sent in the request (this is why it loops and pushes to sets/vals conditionally).
+Always updates updated_at to now.
+Returns the updated row.
+*/
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { db } from '../../shared/db/pool';

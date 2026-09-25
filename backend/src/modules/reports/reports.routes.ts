@@ -1,3 +1,11 @@
+/*
+Read-only endpoint to fetch an immutable assessment report with per-question breakdown.
+
+GET /api/reports/:attemptId — Fetches the complete report for a finished attempt.
+Access control: students see only their own reports; mentors see only reports for students assigned to them; admins see all.
+Returns overall/technical/communication scores, proctoring data (tab_switch_count, is_proctor_flagged), and a question-by-question breakdown with individual scores, feedback, strengths, and weaknesses.
+The report itself is written once by POST /sessions/:id/complete and never modified.
+*/
 import { Router, Response } from 'express';
 import { db } from '../../shared/db/pool';
 import { AppError } from '../../shared/errors/AppError';

@@ -1,3 +1,34 @@
+/*
+Manages the live assessment session — the real-time layer that sits inside an attempt and controls what the student sees and does.
+
+Helper: getNextQuestion(attemptId, nextSeq, difficulty, studentName)
+Tries to pick a random question from the bank at the requested difficulty, excluding questions already used in this attempt. If the bank is empty, falls back to AI generation via ai-client. Returns null if both fail.
+
+POST /api/sessions/start — Student starts (or resumes) a session for an attempt.
+Verifies the student owns the attempt and it's IN_PROGRESS.
+If a session already exists and is PAUSED, resumes it (PAUSED → ACTIVE) and returns the current question.
+If already ACTIVE, rejects with 409.
+If new: creates an ACTIVE session with zeroed proctoring counters, generates the first question at EASY difficulty.
+If no question can be sourced (bank empty + AI down), rolls session back to INITIALIZED and returns 503.
+
+GET /api/sessions/:id — Student views their session state and current question.
+
+POST /api/sessions/:id/proctor-event — Records tab switches and focus-loss events.
+Increments tab_switch_count or fullscreen_exit_count in state_data.
+At MAX_TAB_SWITCH_LIMIT: flags the session (is_proctor_flagged = true).
+At MAX_TAB_SWITCH_LIMIT + 2: terminates the session entirely.
+Writes an audit log at 3-4 switches as a warning.
+Returns a warning message to the student before flagging.
+
+POST /api/sessions/:id/complete — Finalizes the session and generates the assessment report.
+Aggregates all response evaluations for the attempt.
+Computes averages: techAvg, commAvg, overall (70% tech + 30% comm).
+Collects all strengths/weaknesses/feedback across responses.
+Writes an immutable report to performance.assessment_reports (ON CONFLICT DO NOTHING).
+Marks session COMPLETED and attempt COMPLETED.
+Emits ATTEMPT_COMPLETED event (fire-and-forget via setImmediate).
+Returns final scores and reportId.
+*/
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { db } from '../../shared/db/pool';

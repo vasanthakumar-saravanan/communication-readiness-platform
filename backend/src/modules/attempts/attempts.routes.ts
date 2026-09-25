@@ -1,3 +1,28 @@
+//Known Bug: The student tries to cancel the attempt one day before...
+//Actual Cause: The check is currently too strict only IN_PROGRESS.
+//Logical Fix: Add more states such as SCHEDULED, PENDING, CANCELLED whichever is necessary.
+
+/*
+Manages a student's "attempt" — the outer container that wraps one full run through an assessment (holds the session, questions, responses, credits, etc. inside it).
+
+POST /api/attempts/start — Student starts a new attempt. Does this in order:
+Looks up the student's record (batch, program, subdivision) from their user ID.
+Checks the assessment exists and is active.
+Blocks them if they already have an IN_PROGRESS attempt for the same assessment (409 error).
+Deducts a credit via CreditService.consume() (currently a fake stub that always succeeds).
+Creates the attempt row, snapshotting the student's program/batch/subdivision at that moment.
+Returns the new attemptId and credit balance.
+
+GET /api/attempts/:id — View one attempt's details. A STUDENT can only see their own attempt (checked via student_user_id !== user.id → 403 if mismatch); any other role (mentor/admin) can see any attempt.
+
+PUT /api/attempts/:id/abandon — Student cancels their own attempt (Broken. Check First 3 lines).
+
+Confirms the attempt exists and belongs to them.
+Confirms it's currently IN_PROGRESS (can't abandon a completed/already-abandoned one).
+Sets status to ABANDONED and stamps completed_at.
+
+In one line: this is the entry/exit gate for a student's assessment — starts it (with credit + duplicate checks), lets you check its status, and lets you cancel it cleanly.
+*/
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { db } from '../../shared/db/pool';
