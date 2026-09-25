@@ -15,8 +15,9 @@ export interface UserRegisteredPayload {
 }
 
 export interface AttemptCompletedPayload {
-  sessionId: string;
+  attemptId: string;
   studentId: string;
+  assessmentType: string;
   overallScore: number;
 }
 

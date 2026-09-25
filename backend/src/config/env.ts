@@ -12,6 +12,9 @@ const schema = z.object({
   DATABASE_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/comm_readiness'),
   UPLOAD_MAX_FILE_SIZE_MB: z.coerce.number().default(5),
   UPLOAD_DIR: z.string().default('uploads'),
+  MAX_TAB_SWITCH_LIMIT: z.coerce.number().int().min(1).default(4),
+  MAX_REPLAY_COUNT: z.coerce.number().int().min(1).default(2),
+  MAX_QUESTIONS_PER_SESSION: z.coerce.number().int().min(1).default(5),
 });
 
 export const env = schema.parse(process.env);
