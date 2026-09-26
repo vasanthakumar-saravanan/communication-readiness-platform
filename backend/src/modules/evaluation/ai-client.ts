@@ -75,8 +75,8 @@ export async function evaluateResponse(
     const latencyMs = Date.now() - start;
 
     return {
-      technical_score: Math.round(data.technical_score * 10 * 100) / 100,
-      communication_score: Math.round(data.communication_score * 10 * 100) / 100,
+      technical_score: Math.min(100, Math.max(0, Math.round(data.technical_score * 10 * 100) / 100)),
+      communication_score: Math.min(100, Math.max(0, Math.round(data.communication_score * 10 * 100) / 100)),
       wpm: data.wpm,
       filler_count: data.filler_words,
       feedback: data.feedback,

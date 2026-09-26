@@ -111,7 +111,13 @@ sessionsRouter.post(
         if (existing[0].state === 'ACTIVE') {
           throw new AppError(409, 'Session already active for this attempt', 'SESSION_ALREADY_ACTIVE');
         }
-        // Resume existing session (PAUSED → ACTIVE)
+        if (existing[0].state === 'COMPLETED') {
+          throw new AppError(409, 'Session already completed', 'SESSION_ALREADY_COMPLETED');
+        }
+        if (existing[0].state === 'TERMINATED') {
+          throw new AppError(409, 'Session was terminated due to proctoring violations', 'SESSION_TERMINATED');
+        }
+        // Resume existing session (only PAUSED or INITIALIZED-retry reaches here)
         const { rows: sessionRows } = await db.query(
           `UPDATE session.assessment_sessions
            SET state = 'ACTIVE', last_activity_at = now(), updated_at = now()
@@ -287,6 +293,16 @@ sessionsRouter.post(
         [JSON.stringify(stateData), newState, id]
       );
 
+      // B5: when session is terminated by proctoring, also abandon the attempt
+      if (newState === 'TERMINATED') {
+        await db.query(
+          `UPDATE assessment.assessment_attempts
+           SET status = 'ABANDONED', completed_at = now()
+           WHERE id = $1 AND status = 'IN_PROGRESS'`,
+          [session.attempt_id]
+        );
+      }
+
       // Write audit log for 3-4 switches (warning level)
       if (stateData.tab_switch_count >= 3 && stateData.tab_switch_count <= 4) {
         await db.query(
@@ -424,9 +440,13 @@ sessionsRouter.post(
       setImmediate(() => {
         eventBus.emit(Events.ATTEMPT_COMPLETED, {
           attemptId: session.attempt_id,
+          assessmentId: session.assessment_id,
           studentId: session.student_id,
           assessmentType: session.assessment_type,
+          technicalScore: Math.round(techAvg * 100) / 100,
+          communicationScore: Math.round(commAvg * 100) / 100,
           overallScore: overall,
+          reportId: reportRows[0]?.id ?? null,
         });
       });
 

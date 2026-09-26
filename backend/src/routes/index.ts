@@ -17,6 +17,9 @@ import { responsesRouter } from '../modules/responses/responses.routes';
 import { reportsRouter } from '../modules/reports/reports.routes';
 import { questionBankRouter } from '../modules/question-bank/question-bank.routes';
 
+// M1 audio interview routes (bank-fallback + audio turns)
+import { interviewRouter } from './interview.routes';
+
 export const router = Router();
 
 // Public
@@ -37,6 +40,21 @@ router.use('/admin', authenticate, adminRouter);
 router.use('/assessments', assessmentsRouter);
 router.use('/attempts', attemptsRouter);
 router.use('/sessions', sessionsRouter);
+// M1 audio routes mounted after M2 sessions — adds /sessions/bank-fallback and /sessions/:id/turns
+router.use('/sessions', interviewRouter);
 router.use('/responses', responsesRouter);
 router.use('/reports', reportsRouter);
 router.use('/question-bank', questionBankRouter);
+
+// Module 4 — Credits, Checklist, Verifications, Placement Eligibility
+import { creditsRouter } from '../modules/credits/credits.routes';
+import { creditPoliciesRouter } from '../modules/credits/credit-policies.routes';
+import { checklistRouter } from '../modules/checklist/checklist.routes';
+import { verificationsRouter } from '../modules/verifications/verifications.routes';
+import { placementRouter } from '../modules/placement/placement.routes';
+
+router.use('/credits', creditsRouter);
+router.use('/credit-policies', creditPoliciesRouter);
+router.use('/checklist', checklistRouter);
+router.use('/verifications', verificationsRouter);
+router.use('/placement-eligibility', placementRouter);

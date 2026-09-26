@@ -6,6 +6,10 @@ export const db = new Pool({
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 2_000,
+  // Supabase (and most cloud Postgres providers) require SSL.
+  // rejectUnauthorized:false is safe for Supabase — certs are valid but may not
+  // be in Node.js's default CA bundle on some platforms.
+  ssl: env.NODE_ENV !== 'development' ? { rejectUnauthorized: false } : undefined,
 });
 
 db.on('connect', () => {

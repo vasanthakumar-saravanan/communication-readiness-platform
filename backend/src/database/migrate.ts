@@ -6,7 +6,11 @@ import path from 'path';
 const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
 
 async function main(): Promise<void> {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const isProduction = process.env.NODE_ENV !== 'development';
+  const client = new Client({
+    connectionString: process.env.DATABASE_URL,
+    ssl: isProduction ? { rejectUnauthorized: false } : undefined,
+  });
   await client.connect();
   console.log('[migrate] connected to database');
 

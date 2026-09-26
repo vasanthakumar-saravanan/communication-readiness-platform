@@ -15,6 +15,10 @@ const schema = z.object({
   MAX_TAB_SWITCH_LIMIT: z.coerce.number().int().min(1).default(4),
   MAX_REPLAY_COUNT: z.coerce.number().int().min(1).default(2),
   MAX_QUESTIONS_PER_SESSION: z.coerce.number().int().min(1).default(5),
+  // Optional — required for audio turn caching (M1 sessionContextService).
+  // Provide redis://localhost:6379 for local dev; Upstash URL for cloud.
+  // If unset, session context caching is disabled but audio turns still work.
+  REDIS_URL: z.string().url().optional(),
 });
 
 export const env = schema.parse(process.env);

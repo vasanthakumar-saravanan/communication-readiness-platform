@@ -158,6 +158,14 @@ attemptsRouter.put(
         [id]
       );
 
+      // B6: if a session exists and is still active/paused, terminate it
+      await db.query(
+        `UPDATE session.assessment_sessions
+         SET state = 'TERMINATED', updated_at = now()
+         WHERE attempt_id = $1 AND state IN ('ACTIVE', 'PAUSED')`,
+        [id]
+      );
+
       sendSuccess(res, { message: 'Attempt abandoned' });
     } catch (err) {
       sendError(res, err);

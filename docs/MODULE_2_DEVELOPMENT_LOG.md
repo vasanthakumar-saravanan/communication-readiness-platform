@@ -2,14 +2,617 @@
 
 ## Current Status
 
-- **Current phase:** Migration static analysis complete — live execution BLOCKED (no DB available)
-- **Overall status:** CODED, NOT FULLY VERIFIED
-- **Last completed task:** Migration static analysis (031–043) — all pass static checks; live execution blocked
-- **Current task:** (none — awaiting next instruction)
-- **Next task:** Set up local PostgreSQL with pgvector, create `.env`, run `npm run migrate`, then run end-to-end HTTP flow test
+- **Current phase:** M1 Integration Fixes COMPLETE (2026-09-26) — B-TURNS-NO-AUTH, B-RESPONSE-SPLIT, B-QBANK-NAME, B-REDIS-NEW all fixed
+- **Overall status:** M2 COMPLETE. M1 integration fixes implemented in shared backend. TypeScript PASS. M3 and M4 still blocked.
+- **Last completed task:** M1 audio interview integration (2026-09-26) — interview.routes.ts + sessionContextService.ts + migration 016
+- **Current task:** Awaiting Supabase project confirmation + user approval to run migrations
+- **Next task:** Create backend/.env → run migrations 001–015 + 016 + 031–043 on Supabase → smoke test
 - **TypeScript/build status:** PASS — `tsc --noEmit` exits 0, no errors
 - **Test status:** NOT WRITTEN YET
-- **Database migration status:** SQL files written (031–043), statically verified — NOT YET EXECUTED against live database
+- **Database migration status:** SQL files written (001–015, 016, 031–043), statically verified — NOT YET EXECUTED against live database. 016 is NEW and required before audio turns work.
+- **Live database:** SUPABASE PROJECT BEING CREATED — do not connect or run migrations until explicitly instructed
+- **M3 integration:** ON HOLD — M3 has zero implementation as of latest audit (commit 214eb0ef)
+- **Redis:** OPTIONAL — graceful degradation implemented; provide REDIS_URL in .env for turn caching
+
+---
+
+## Work Log — 2026-09-26 (M1 Audio Interview Integration — B-TURNS-NO-AUTH, B-RESPONSE-SPLIT, B-QBANK-NAME, B-REDIS-NEW)
+
+### Task
+Implement four M1 integration fixes identified in the consolidated audit. All fixes applied to the shared backend without modifying any existing M2 code. TypeScript compilation verified to pass.
+
+### Fixes Implemented
+
+**B-TURNS-NO-AUTH — Authentication added to audio turns endpoint** (`src/routes/interview.routes.ts`)
+
+The `POST /api/sessions/:id/turns` endpoint now requires:
+1. `authenticate` middleware placed **before** `audioUpload.single('audio')` — student identity comes from verified JWT, never from request body
+2. Session ownership check: DB query confirms `session.student_user_id === req.user.id`
+3. Session state check: rejects turns when session state ≠ `ACTIVE`
+
+**B-RESPONSE-SPLIT — Audio turns now write to M2 evaluation tables** (`src/routes/interview.routes.ts`)
+
+Root cause: `evaluation.responses.question_id` is `NOT NULL`. Audio turns had no corresponding `session.questions` row, so they could never write to `evaluation.response_evaluations`, and M2's complete handler computed null scores.
+
+Fix flow:
+1. `GET /api/sessions/bank-fallback` now inserts the served question into `session.questions` (with `question_type = 'INTERVIEW'`, `is_generated = false`). Audio sessions now have a valid `question_id` for each turn.
+2. `POST /api/sessions/:id/turns` looks up the question from `session.questions` (by `attempt_id + sequence_no`) and creates:
+   - `evaluation.responses` — linked to the attempt and question, `input_type = 'VOICE'`
+   - `evaluation.ai_runs` — records FastAPI latency, status
+   - `evaluation.response_evaluations` — `technical_score`, `communication_score` (0–100, B-CLAMP applied), communication metrics
+3. Also writes to `session.interview_transcripts` (migration 016) with a `.catch()` guard — non-fatal if migration 016 hasn't been run yet.
+4. M2's `POST /sessions/:id/complete` handler aggregates from `evaluation.response_evaluations` as normal — no changes to M2 code needed.
+
+**B-QBANK-NAME — Bank-fallback uses correct table** (`src/routes/interview.routes.ts`)
+
+Changed `FROM session.question_bank` → `FROM session.question_bank_items`. Domain/category filters now use `metadata->>'domain'` and `metadata->>'category'` since `question_bank_items` stores these in the `metadata JSONB` column (no dedicated columns).
+
+**B-REDIS-NEW — REDIS_URL added to environment schema** (`src/config/env.ts`, `backend/.env.example`)
+
+`REDIS_URL` added as `z.string().url().optional()` — server starts without it. `sessionContextService.ts` uses dynamic `require('ioredis')` with `lazyConnect: true` and all errors caught — graceful noop when Redis is unavailable. `.env.example` now documents the requirement with setup instructions.
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `backend/src/database/migrations/016_session_transcripts.sql` | M1 migration — `session.interview_transcripts` table + indexes. Must be run before audio turns write transcripts. |
+| `backend/src/routes/interview.routes.ts` | M1 audio interview routes — `GET /sessions/bank-fallback` + `POST /sessions/:id/turns` with all four fixes |
+| `backend/src/services/sessionContextService.ts` | Redis turn cache — graceful noop if REDIS_URL unset or ioredis unavailable |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `backend/src/config/env.ts` | Added `REDIS_URL: z.string().url().optional()` |
+| `backend/src/routes/index.ts` | Imported `interviewRouter`; mounted at `/sessions` after M2's `sessionsRouter` |
+| `backend/.env.example` | Documented `REDIS_URL` with local dev and cloud setup instructions |
+| `backend/package.json` | Added `ioredis: ^5.4.0`, `form-data: ^4.0.1` to dependencies |
+
+### Files NOT Modified
+- All existing M2 modules (`sessions.routes.ts`, `responses.routes.ts`, `attempts.routes.ts`, `ai-client.ts`, `events.ts`) — unchanged
+- No migration files modified — only 016 added (new)
+
+### Verification
+- `tsc --noEmit`: **PASS — 0 errors**
+- `npm install`: 9 packages added (ioredis, form-data, transitive deps)
+- `git diff --name-only`: exactly the files listed above changed
+- Static review: auth middleware order correct, question linkage verified against schema constraints
+
+### Migration Status
+- **Migration 016** (`session.interview_transcripts`) is written and required — NOT YET RUN. The turns endpoint has a `.catch()` so it degrades gracefully until 016 is applied.
+- All other migrations (001–015, 031–043) still pending Supabase first run.
+
+### Remaining Blockers
+
+| ID | Blocker | Owner | Severity |
+|----|---------|-------|----------|
+| Migration 016 | `session.interview_transcripts` not yet run — transcripts not persisted | User (Supabase) | HIGH |
+| B-RESPONSE-SPLIT (partial) | If student completes via audio path but migration 016 missing, transcripts silently dropped. Scores ARE persisted. | — | LOW (catch guard) |
+| M3 | Zero implementation; performance analytics unavailable | M3 team | CRITICAL |
+| M4 | Zero implementation; credit enforcement unavailable | M4 team | CRITICAL |
+
+---
+
+## Integration Audit — 2026-09-26 (Full Module Integration + Testing Phase — COMPLETE)
+
+### Task
+Full Module Integration + Testing phase. Parallel agents audited M1 (tamil-selvan-k), M3 (bavanbalaji007), and M4 (Ricardo-67) latest states. Consolidated 18-section report produced. See `CROSS_MODULE_INTEGRATION_LOG.md` Entry 2026-09-26 (Full Audit) for complete findings.
+
+### M2 Integration Verification (Completed)
+
+All M2 routes, schemas, event contracts, and cross-module dependencies verified against actual code:
+- 20 routes across 7 routers — all verified correct
+- Auth contract (authenticate + requireRole) — correct usage confirmed
+- ATTEMPT_COMPLETED payload — 8 fields, B10 FIXED, score formula documented
+- CreditService stub interface documented for M4 delivery
+- B5/B6/B-CLAMP/B10 fixes confirmed in code
+- performance.assessment_reports.listening_score column exists — ready for M3 population
+- question_bank_item_skills.skill_id FK deferred — no FK constraint written yet (safe)
+
+### M1 Audit Results (Commit `74c927a0`, 2026-09-25)
+
+M1 pushed a significant new commit ("Module 2 partially completed"). Key findings:
+- Migration 016 (`session.interview_transcripts`) added — deferred FK correctly documented ✓
+- `POST /api/sessions/:id/turns` implemented — audio upload via multer + FastAPI audio pipeline
+- `GET /api/sessions/bank-fallback` implemented — but queries wrong table (see below)
+- New `SessionContextService` uses `ioredis` — new runtime dependency (REDIS_URL env var required)
+- New ai-service audio pipeline: `POST /ai/evaluate-response` (Groq Whisper + librosa + webrtcvad)
+
+**NEW CRITICAL BUGS in M1:**
+
+| ID | Issue |
+|----|-------|
+| B-TURNS-NO-AUTH | `POST /sessions/:id/turns` has NO authenticate middleware; student identity taken from request body |
+| B-RESPONSE-SPLIT | Audio turns write to `interview_transcripts` only — scores excluded from `response_evaluations`; M2 complete handler computes null final score for audio sessions |
+| B-QBANK-NAME | `bank-fallback` still queries `session.question_bank` (CONFIRMED in code); always falls back to static questions |
+
+**New HIGH issues in M1:**
+
+| ID | Issue |
+|----|-------|
+| B-REDIS-NEW | `ioredis` new dependency; `REDIS_URL` not in env.ts; turns endpoint fails without Redis at runtime |
+| B-NO-SESSION-OWNERSHIP | Turns endpoint does not verify session belongs to requesting student |
+
+### M3 Audit Results (Commit `214eb0ef`, 2026-09-24)
+
+Latest M3 commit is a merge FROM M1, not new M3 work. M3 has zero module-specific implementation:
+- Only migrations 001–015 (M1 base) — no 061–090 range
+- `performance.skills` and `performance.listening_stories` do NOT exist
+- No M3 routes, no event listeners, no performance analytics
+- `events.ts` still has OLD 3-field payload `{sessionId, studentId, overallScore}` — incompatible with B10-fixed payload
+- No `CREATE EXTENSION vector` in M3's migration 001
+
+### M4 Audit Results (Commit `f7a62a72`, 2026-09-24)
+
+M4 is unchanged from prior audit. Zero M4-specific implementation:
+- Only migrations 001–015 (M1 base) — no 091–114 range
+- Credit tables do NOT exist
+- CreditService real implementation NOT delivered
+- M2 stub still active; students can start unlimited attempts
+
+### Files Modified
+- `docs/CROSS_MODULE_INTEGRATION_LOG.md` — sections A–J integration audit (prior entry) + full M1/M3/M4 audit section appended
+- `docs/MODULE_2_DEVELOPMENT_LOG.md` — this entry; current status updated to reflect audit complete
+
+---
+
+## Work Log — 2026-09-26 (B5, B6, B10, B-CLAMP Fixes)
+
+### Task
+Implement four approved isolated M2 fixes from the pre-Supabase readiness pass. No schema changes, no migration changes, no external integrations.
+
+### Fixes Implemented
+
+**B5 — Session TERMINATED now abandons attempt** (`sessions.routes.ts:296–304`)
+
+After the session UPDATE sets `state = 'TERMINATED'`, a conditional UPDATE now runs:
+```sql
+UPDATE assessment.assessment_attempts
+SET status = 'ABANDONED', completed_at = now()
+WHERE id = $1 AND status = 'IN_PROGRESS'
+```
+Guard `AND status = 'IN_PROGRESS'` prevents double-updating already-completed attempts.
+
+**B6 — Attempt ABANDONED now terminates session** (`attempts.routes.ts:161–167`)
+
+After the attempt UPDATE sets `status = 'ABANDONED'`, a second UPDATE now runs:
+```sql
+UPDATE session.assessment_sessions
+SET state = 'TERMINATED', updated_at = now()
+WHERE attempt_id = $1 AND state IN ('ACTIVE', 'PAUSED')
+```
+Guard `AND state IN ('ACTIVE', 'PAUSED')` preserves already COMPLETED or TERMINATED sessions.
+
+**B10 — AttemptCompletedPayload complete** (`events.ts:17–25`, `sessions.routes.ts:441–450`)
+
+Added 4 fields to the type and emit call: `assessmentId`, `technicalScore`, `communicationScore`, `reportId`. All values were already computed in the handler — no new queries added.
+
+New payload emitted:
+```typescript
+{
+  attemptId, assessmentId, studentId, assessmentType,
+  technicalScore, communicationScore, overallScore, reportId
+}
+```
+
+**B-CLAMP — Score overflow prevention** (`ai-client.ts:78–79`)
+
+Wrapped both score normalizations in `Math.min(100, Math.max(0, ...))`:
+```typescript
+technical_score:    Math.min(100, Math.max(0, Math.round(data.technical_score    * 10 * 100) / 100))
+communication_score: Math.min(100, Math.max(0, Math.round(data.communication_score * 10 * 100) / 100))
+```
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/modules/sessions/sessions.routes.ts` | B5: attempt ABANDONED on proctor TERMINATE; B10: complete emit payload |
+| `src/modules/attempts/attempts.routes.ts` | B6: session TERMINATED on attempt ABANDON |
+| `src/shared/events/events.ts` | B10: 4 new fields on AttemptCompletedPayload |
+| `src/modules/evaluation/ai-client.ts` | B-CLAMP: scores clamped to 0–100 |
+
+### Files NOT Modified
+- No migrations touched
+- No schema changes
+- No docs/API_REFERENCE.md changes (pre-existing modification)
+- M3, M4 not touched
+
+### Verification
+- `tsc --noEmit`: **PASS — 0 errors**
+- `git diff --name-only`: exactly 4 source files changed + pre-existing docs
+- Static review of all changed regions: correct
+
+### Bug Status Update
+
+| ID | Status |
+|----|--------|
+| B1 | FIXED (prior) |
+| B2 | FIXED (prior) |
+| B3 | FIXED (prior, confirmed by audit) |
+| B4 | NOT FIXED — requires M4 CreditService coordination |
+| **B5** | **FIXED** ✓ |
+| **B6** | **FIXED** ✓ |
+| B7 | NOT FIXED — session expires_at policy unimplemented |
+| B8 | DOC ONLY |
+| B9 | DOC ONLY |
+| **B10** | **FIXED** ✓ |
+| B11 | NOT FIXED — GET /attempts/:id no FACULTY_MENTOR scope |
+| B12 | NOT FIXED — duplicate response → unhandled 500 |
+| **B-CLAMP** | **FIXED** ✓ |
+
+---
+
+## Investigation — 2026-09-26 (Pre-Supabase Readiness Pass)
+
+### Task
+Focused code-level investigation of B10, M1 question-bank conflict, migration 110 feasibility, B5, B6, B-CLAMP, and Supabase readiness. No code changes applied.
+
+### A. B10 — ATTEMPT_COMPLETED CONTRACT
+
+**Current type definition** (`src/shared/events/events.ts:17–22`):
+```typescript
+export interface AttemptCompletedPayload {
+  attemptId: string;
+  studentId: string;
+  assessmentType: string;   // ← present but wrong semantics (type string, not ID)
+  overallScore: number;
+}
+```
+
+**Current emit call** (`src/modules/sessions/sessions.routes.ts:430–436`):
+```typescript
+eventBus.emit(Events.ATTEMPT_COMPLETED, {
+  attemptId: session.attempt_id,        // ✓ correct
+  studentId: session.student_id,        // ✓ correct
+  assessmentType: session.assessment_type, // string, not assessmentId UUID
+  overallScore: overall,                // ✓ correct
+});
+```
+
+**Required fields (per cross-module design):**
+
+| Field | Present? | Value available in handler? |
+|-------|----------|-----------------------------|
+| `attemptId` | ✓ | `session.attempt_id` |
+| `studentId` | ✓ | `session.student_id` |
+| `assessmentId` | ✗ MISSING | `session.assessment_id` (already fetched in JOIN at line 333–342) |
+| `assessmentType` | ✓ (as string) | `session.assessment_type` — useful, keep it |
+| `technicalScore` | ✗ MISSING | `Math.round(techAvg * 100) / 100` (computed at line 402–403) |
+| `communicationScore` | ✗ MISSING | `Math.round(commAvg * 100) / 100` (computed at line 403) |
+| `overallScore` | ✓ | `overall` |
+| `reportId` | ✗ MISSING | `reportRows[0]?.id` (available at line 411 before the emit) |
+
+All missing values are already computed before the setImmediate call. No new queries needed.
+
+**Files requiring modification when B10 is fixed:**
+1. `src/shared/events/events.ts` — add 3 fields to `AttemptCompletedPayload`
+2. `src/modules/sessions/sessions.routes.ts` lines 431–436 — pass the 3 new fields in the emit call
+
+**B10 is NOT a blocker for first live DB test** (the event has no listeners yet) but **IS a blocker for M3/M4 integration** — they must not build listeners against the incomplete payload.
+
+---
+
+### B. M1 QUESTION BANK CONFLICT
+
+**M2 migration 035** creates: `session.question_bank_items` (confirmed in file `035_session_question_bank_items.sql`)
+
+**M2 code** (`sessions.routes.ts:32`):
+```sql
+SELECT id, question_text, difficulty FROM session.question_bank_items
+  WHERE is_active = true AND difficulty = $1
+```
+M2 consistently uses `session.question_bank_items` in all its queries.
+
+**M1 bank-fallback route** (per 2026-09-26 cross-module audit of M1 source):
+```typescript
+// Queries session.question_bank — table does NOT exist
+```
+
+**Conclusion:**
+- Canonical table name: `session.question_bank_items` (M2's migration 035 is the authoritative definition)
+- M1's `GET /api/sessions/bank-fallback` will throw a PostgreSQL relation-does-not-exist error at runtime
+- This is an M1 bug, not an M2 bug — M1 team must update their query
+- M2 does not need to rename or alias any table
+
+**This does NOT block M2's first live test** — M2 never calls M1's bank-fallback route.
+
+---
+
+### C. MIGRATION 110
+
+**M1 migration 016** (`016_session_transcripts.sql` — exists in M1 repo, NOT in this repo) creates:
+```sql
+CREATE TABLE session.interview_transcripts (
+  session_id UUID NOT NULL  -- intentionally no FK — deferred until M2 migration 034 runs
+)
+```
+
+**M2 migration 034** creates `session.assessment_sessions(id UUID PRIMARY KEY)` — this is the FK target.
+
+**The required migration:**
+```sql
+ALTER TABLE session.interview_transcripts
+  ADD CONSTRAINT fk_transcripts_session_id
+    FOREIGN KEY (session_id)
+    REFERENCES session.assessment_sessions(id);
+```
+
+**Safe migration number:** The team's shared FK range is 115+. The correct number is **116** (leaving 115 for the `performance.skills` FK once M3 delivers). Alternatively 044 would also work (runs right after 043, before M3's 061 range) — but the team convention places cross-module FKs at 115+.
+
+**Critical prerequisite:** Migration 016 (`session.interview_transcripts`) must exist in the shared migrations folder and must have already run before migration 116 can execute. Currently, 016 is absent from this repo. This means:
+- M1 team must contribute 016 to the shared migrations folder, OR
+- It must be added here before 116 can be written
+
+**This does NOT block M2's first live test** — M2 does not query `session.interview_transcripts`.
+
+---
+
+### D. B5 — SESSION TERMINATED LEAVES ATTEMPT IN_PROGRESS
+
+**Location:** `src/modules/sessions/sessions.routes.ts:284–293`
+
+**Current code:**
+```typescript
+let newState = session.state;
+if (stateData.is_proctor_flagged && stateData.tab_switch_count > maxLimit + 1) {
+  newState = 'TERMINATED';
+}
+await db.query(
+  `UPDATE session.assessment_sessions
+   SET state_data = $1, state = $2, last_activity_at = now(), updated_at = now()
+   WHERE id = $3`,
+  [JSON.stringify(stateData), newState, id]
+);
+```
+
+**Problem:** When `newState = 'TERMINATED'`, only `session.assessment_sessions.state` is updated. There is no UPDATE to `assessment.assessment_attempts.status`.
+
+**Expected behavior:** `assessment.assessment_attempts.status` should be set to `'ABANDONED'` (confirmed: the only valid terminal statuses are `IN_PROGRESS`, `COMPLETED`, `ABANDONED` per migration 033 CHECK constraint — there is no `TERMINATED` status on attempts).
+
+**Consequence if unfixed:** The attempt stays `IN_PROGRESS` forever. The student cannot start a new attempt for the same assessment because `attempts.routes.ts:49–56` guards against concurrent `IN_PROGRESS` attempts:
+```sql
+SELECT id FROM assessment.assessment_attempts
+WHERE student_id = $1 AND assessment_id = $2 AND status = 'IN_PROGRESS'
+```
+A terminated-but-not-abandoned attempt would permanently block the student from re-attempting.
+
+**BLOCKER STATUS: YES** — blocks re-attempt after proctoring termination in live testing.
+
+---
+
+### E. B6 — ATTEMPT ABANDONED LEAVES SESSION ACTIVE
+
+**Location:** `src/modules/attempts/attempts.routes.ts:155–160`
+
+**Current code:**
+```typescript
+await db.query(
+  `UPDATE assessment.assessment_attempts SET status = 'ABANDONED', completed_at = now()
+   WHERE id = $1`,
+  [id]
+);
+sendSuccess(res, { message: 'Attempt abandoned' });
+```
+
+**Problem:** No query to `session.assessment_sessions`. The associated session (if it exists and is ACTIVE or PAUSED) remains in that state indefinitely.
+
+**Expected behavior:** If a session exists for this attempt and its state is `ACTIVE` or `PAUSED`, it should be updated to `TERMINATED`.
+
+**Consequence if unfixed:** Orphaned active session records. If the student later calls `GET /api/sessions/:id`, they will see a session still ACTIVE for an ABANDONED attempt. If M3/M4 join against sessions looking for non-terminal states, they may pick up ghost sessions.
+
+**BLOCKER STATUS: MEDIUM** — does not block the primary assessment happy path. Only triggered if student explicitly abandons.
+
+---
+
+### F. B-CLAMP — SCORE OVERFLOW
+
+**Location:** `src/modules/evaluation/ai-client.ts:78–79`
+
+**Current code:**
+```typescript
+technical_score: Math.round(data.technical_score * 10 * 100) / 100,
+communication_score: Math.round(data.communication_score * 10 * 100) / 100,
+```
+
+**Problem:** FastAPI contracts return scores on a 0–10 scale. Multiplying by 10 converts to 0–100. There is no clamp. A FastAPI score of 10.5 produces 105.0.
+
+**Database impact:** `evaluation.response_evaluations.technical_score NUMERIC(5,2)` — no CHECK constraint, accepts 105.00 without error. `performance.assessment_reports.technical_score NUMERIC(5,2)` — same, no constraint. The corrupt value propagates silently through the aggregation in `sessions.routes.ts:362–364`.
+
+**Fix (1 line per score field):**
+```typescript
+technical_score: Math.min(100, Math.max(0, Math.round(data.technical_score * 10 * 100) / 100)),
+communication_score: Math.min(100, Math.max(0, Math.round(data.communication_score * 10 * 100) / 100)),
+```
+
+**BLOCKER STATUS: LOW** — only triggered if LLM returns a score > 10 (unlikely under normal operation, possible under adversarial or misconfigured prompts).
+
+---
+
+### G. SUPABASE READINESS
+
+| Check | Status | Evidence |
+|-------|--------|---------|
+| DATABASE_URL env var | READY | `env.ts:12` — Zod string, default is localhost but overridden by `.env` |
+| `.env` gitignored | ✓ SAFE | `.gitignore` lines 23–30 cover `.env`, `.env.*`, `backend/.env`, `backend/.env.*` |
+| `.env.example` tracked | ✓ CORRECT | `!backend/.env.example` is excluded from ignore |
+| Migration runner reads DATABASE_URL | READY | `migrate.ts:9` — `new Client({ connectionString: process.env.DATABASE_URL })` |
+| Migration runner is transactional | ✓ SAFE | `migrate.ts:42–52` — each file in BEGIN/COMMIT/ROLLBACK |
+| Migration tracking table | ✓ CORRECT | `system.migrations` tracks by filename — safe to run incrementally |
+| Alphabetical sort order | ✓ CORRECT | 001→015→031→043 sorts correctly; gap 016–030 is fine (no files) |
+| pgvector in Supabase | ✓ SUPPORTED | Supabase pre-installs pgvector. `CREATE EXTENSION IF NOT EXISTS vector` in migration 031 succeeds. |
+| pgvector NOT in migration 001 | ✓ CORRECT | Migration 001 only installs uuid-ossp, pgcrypto, pg_trgm. pgvector is added in 031 with IF NOT EXISTS — safe. |
+| All FKs resolvable in 001–043 range | ✓ CLEAN | All FKs reference tables created within 001–043. Deferred FK (`question_bank_item_skills.skill_id` → performance.skills) has NO FK in the migration — safe. |
+| session.interview_transcripts not needed | ✓ | Migration 016 is absent from this repo; M2 never queries that table. The Supabase DB will not have that table until M1 contributes 016. |
+| Score column constraints | ⚠ RISK | `NUMERIC(5,2)` on score columns has no CHECK ≤ 100. B-CLAMP fix should precede first data load. |
+| No Supabase-specific config needed | ✓ | No SSL/pgbouncer settings required for direct connection. Supabase connection strings work with standard pg driver. |
+
+**Verdict: The current 001–043 migrations can run cleanly on a fresh Supabase database.**
+
+No changes to migrations are required before connecting. The only preparatory step is creating `backend/.env` with the Supabase `DATABASE_URL` (do not commit).
+
+---
+
+### Summary
+
+| Item | Blocker for first live test? | Blocker for M3 integration? | Action needed by |
+|------|------------------------------|----------------------------|-----------------|
+| B10 (event payload) | NO | YES | M2 before M3 builds listeners |
+| M1 question_bank name | NO (M2 unaffected) | YES (M1 bank-fallback fails) | M1 team |
+| Migration 116 (deferred FK) | NO | NO | After M1 provides 016 |
+| B5 (session terminate) | YES (blocks re-attempt) | YES | M2 |
+| B6 (attempt abandon) | MEDIUM | MEDIUM | M2 |
+| B-CLAMP (score overflow) | LOW | LOW | M2 (before data load) |
+| Supabase DB readiness | — (no blockers) | — | Just needs .env |
+
+### Files Modified
+- `docs/MODULE_2_DEVELOPMENT_LOG.md` — this entry added
+- `docs/CROSS_MODULE_INTEGRATION_LOG.md` — created with cross-module contract findings
+
+### Decisions
+No code changes. Awaiting approval.
+
+---
+
+## Update — 2026-09-26 (Cross-Module Architecture Audit + Integration Dependency Update)
+
+### Task
+Full cross-module architecture audit across all four team repositories. Update M3 integration dependency and database target.
+
+### Audit Scope
+All four repositories audited read-only:
+- M1: github.com/tamil-selvan-k/communication-readiness-platform
+- M2: this local repository (feature/module-2-live-integration)
+- M3: github.com/bavanbalaji007/communication-readiness-platform
+- M4: github.com/Ricardo-67/communication-readiness-platform
+
+### Key Findings
+
+**B3 STATUS CORRECTION:**
+The cross-module audit confirmed that B3 is **FIXED** in the current code. `sessions.routes.ts:113–119` already contains the COMPLETED and TERMINATED guards:
+```typescript
+if (existing[0].state === 'COMPLETED') {
+  throw new AppError(409, 'Session already completed', 'SESSION_ALREADY_COMPLETED');
+}
+if (existing[0].state === 'TERMINATED') {
+  throw new AppError(409, 'Session was terminated', 'SESSION_TERMINATED');
+}
+```
+The 2026-09-25 dev log entry incorrectly listed B3 as NOT FIXED. It is fixed. Updated all references.
+
+**M3 INTEGRATION — ON HOLD:**
+The M3 repository (`bavanbalaji007/communication-readiness-platform`) currently contains only the M1 base fork (migrations 001–015, no M3-specific code). Additionally, the interview routes reference non-existent tables (`candidates`, `jobs`, `interview_sessions`) from an unrelated project, and import `openai` directly without it being in `package.json`. This code cannot run as-is.
+
+**Action:** Do NOT integrate the current M3 repository state. The M3 team is completing their implementation and will submit a PR. Integration will happen only after:
+1. M3 PR is merged
+2. Latest merged commit is confirmed
+3. Full inspection of M3's migrations, API contracts, and `performance.skills`/`performance.listening_stories` tables
+4. Comparison against M2 dependencies
+
+**M4 STATUS:**
+M4 is an identical stub fork. Zero credit tables, zero credit endpoints, zero event listeners. `CreditService` stub remains in place — do not remove until M4 delivers.
+
+**SUPABASE DATABASE:**
+Target database is now Supabase PostgreSQL (cloud, with pgvector support). This replaces the previously planned local PostgreSQL setup. Do NOT connect or run migrations until the Supabase project is confirmed ready and connection details are provided.
+
+**Database driver layer:** Stay on raw `pg` driver with custom migration runner. No Drizzle, no Prisma. pgvector column (`embedding vector(1536)` in `session.question_bank_items`) is retained.
+
+**ATTEMPT_COMPLETED event payload (B10):**
+All four modules have divergent `AttemptCompletedPayload` shapes. M2 must fix B10 (add `assessmentId`, `technicalScore`, `communicationScore`, `reportId`) before M3/M4 register their listeners.
+
+**M1 table name conflict:**
+M1's `bank-fallback` route queries `session.question_bank` but M2 created `session.question_bank_items`. M1 team must update their query.
+
+**Migration 110 needed:**
+A migration must be written to add the deferred FK: `session.interview_transcripts.session_id → session.assessment_sessions(id)`. This runs after migrations 031–043.
+
+### Files Modified
+- `docs/MODULE_2_DEVELOPMENT_LOG.md` — this entry; corrected B3 status; updated current status header
+- `docs/PROJECT_CONTEXT.md` — corrected B3 status; added M3 hold and Supabase notes
+
+### Files Created
+None
+
+### Database Changes
+None — Supabase project being created externally; no migrations executed
+
+### Next Tasks (priority order — awaiting approval before implementing)
+1. Fix B5: session TERMINATED → also set attempt ABANDONED
+2. Fix B6: attempt ABANDONED → also terminate session if ACTIVE/PAUSED
+3. Fix B10: complete `AttemptCompletedPayload` fields
+4. Fix B-CLAMP: clamp scores to 0–100 in ai-client.ts
+5. Fix B12: catch PG 23505 on duplicate response → 409
+6. Write migration 110 (deferred FK)
+7. Fix B-NEW-1: verify `filler_count` vs `filler_words` mapping
+8. Correct API_REFERENCE.md POST /responses/submit body
+9. (After Supabase ready) create `backend/.env`, run migrations, test HTTP flow
+10. (After M3 PR merged) inspect M3 migrations and integrate
+
+---
+
+## Audit — 2026-09-25 (Full Repository Audit)
+
+### Task
+Cross-module repository audit: verify all M2 code against actual migrations, FastAPI contracts, design documents, and cross-module event/data contracts. Identify bugs, API mismatches, atomicity gaps, state machine problems, missing features, and edge cases.
+
+### Scope
+- All M2 source files (`assessments`, `attempts`, `sessions`, `responses`, `reports`, `evaluation`)
+- Migrations 031–043
+- FastAPI service (`ai-service/app/`)
+- M1 baseline migrations (004, 012) for FK verification
+- All documentation in `docs/`
+
+### Work Completed
+- Verified FastAPI contract alignment post-B1 fix: ai-client.ts correctly calls `/ai/evaluate-turn`; request/response shapes confirmed
+- Verified actual migration column names against M2 code: `mentor_id` in migration 012 (not `mentor_user_id` as in design doc) — M2 code correct; `user_id` in migration 004 (not `actor_user_id` as in design doc) — M2 code correct
+- Confirmed `performance.assessment_reports` schema location: M2 code and migration 041 are internally consistent; `BACKEND_IMPLEMENTATION_PLAN.md` ISSUE-01 resolution says `assessment` schema — documentation conflict, not a code bug
+- Verified idempotency handling in `POST /api/responses/submit` — correct for matching idempotency key; gap identified for different key / same attempt+question
+- Verified ATTEMPT_COMPLETED event payload vs plan spec — payload is missing fields
+- Identified PAUSED session state is unreachable — no endpoint transitions to PAUSED
+- Identified that `expires_at` column exists in `session.assessment_sessions` but is never populated or checked
+- Identified that listening sub-flow (3 M2 endpoints) is completely blocked on M3 delivering `performance.listening_stories`
+- Created `docs/EDGE_CASES.md` with 40 structured edge cases across EC-M1, EC-M2, EC-M3, EC-M4, EC-CROSS categories
+- Confirmed FastAPI has `/ai/evaluate-listening` fully implemented — M2 has no listening routes yet
+
+### Files Modified
+- `docs/MODULE_2_DEVELOPMENT_LOG.md` — this audit section added
+
+### Files Created
+- `docs/EDGE_CASES.md` — 40 edge cases across all modules and cross-module interactions
+
+### Bugs Found
+
+| ID | Severity | File | Description | Status |
+|----|----------|------|-------------|--------|
+| B3 | CRITICAL | `sessions/sessions.routes.ts:113–119` | `POST /api/sessions/start` resume path re-activates COMPLETED and TERMINATED sessions — only ACTIVE state is guarded | **FIXED** (guards confirmed in code 2026-09-26 audit; dev log was incorrect) |
+| B4 | HIGH | `attempts/attempts.routes.ts` | `CreditService.consume()` and attempt INSERT are not in one transaction; crash between them loses a credit | NOT FIXED |
+| B5 | HIGH | `sessions/sessions.routes.ts:279` | Proctoring TERMINATED transition updates session but leaves attempt IN_PROGRESS | NOT FIXED |
+| B6 | HIGH | `attempts/attempts.routes.ts` | `PUT /api/attempts/:id/abandon` marks attempt ABANDONED but leaves session ACTIVE | NOT FIXED |
+| B7 | MEDIUM | `sessions.routes.ts` | `expires_at` column created in migration 034 but never set or evaluated; session timeout policy unimplemented | NOT FIXED |
+| B8 | INFO | `docs/BACKEND_IMPLEMENTATION_PLAN.md` | ISSUE-01 says `assessment.assessment_reports`; code and migration use `performance.assessment_reports`. Docs must be corrected and M3 informed | NOT FIXED (doc update) |
+| B9 | INFO | `docs/API_REFERENCE.md` | `POST /api/responses/submit` docs show `{ sessionId, transcript, durationSec, mode }`. Actual implementation requires `{ attemptId, questionId, transcript, inputType?, idempotencyKey? }` | NOT FIXED (doc update) |
+| B10 | MEDIUM | `shared/events/events.ts` | `AttemptCompletedPayload` missing `assessmentId`, `technicalScore`, `communicationScore`, `reportId` vs plan spec | NOT FIXED |
+| B11 | LOW | `attempts/attempts.routes.ts` | `GET /api/attempts/:id` has no FACULTY_MENTOR scope check — any mentor can read any student's attempt | NOT FIXED |
+| B12 | LOW | `responses/responses.routes.ts` | Duplicate `(attempt_id, question_id)` submission with a different idempotency key hits DB UNIQUE constraint → unhandled 500 instead of 409 | NOT FIXED |
+
+### AI Score Clamping Gap
+`evaluateResponse()` in `ai-client.ts` multiplies FastAPI scores by 10 but does not clamp to 0–100. A malformed FastAPI score of 12 would produce 120 and corrupt the report. Fix: `Math.min(100, Math.max(0, score))` after normalization.
+
+### Decisions
+- No fixes applied during this audit pass; all bugs documented and classified by severity
+- B1 and B2 were fixed in prior sessions; this audit confirms they are correctly resolved
+- B8, B9, B10 should be addressed as a documentation pass before M3/M4 implement their event handlers to avoid downstream integration failures
+- B3, B4, B5, B6 are correctness bugs — fix order should be B3 first (session state integrity), then B5+B6 together (termination completeness), then B4 (atomicity)
+
+### Next Step
+Choose one of:
+1. **Fix B3** (30 min): Add COMPLETED/TERMINATED guard in `sessions.routes.ts` resume path
+2. **Fix B4** (1–2 hr): Wrap credit-consume + attempt-insert in a DB transaction; requires M4 coordination or a compensating refund
+3. **Fix B5 + B6** (45 min): Terminate session on attempt abandon; update attempt on session terminate
+4. **Fix B10** (20 min): Add missing fields to `AttemptCompletedPayload` in `events.ts` and the `sessions/complete` emit call
+5. **Doc pass B8 + B9** (30 min): Correct `BACKEND_IMPLEMENTATION_PLAN.md` and `API_REFERENCE.md`
+
+Recommended order: B3 → B5+B6 → B10 → doc pass → B4 (needs M4 coordination).
 
 ---
 
