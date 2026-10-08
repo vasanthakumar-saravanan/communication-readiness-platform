@@ -898,7 +898,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
       .catch(() => {}); // Keep cached value if the server is temporarily unavailable.
     return () => { cancelled = true; };
-  }, [currentUser?.id, interviewState.isCompletedAwaitingEvaluation]);
+  }, [currentUser?.id, interviewState.sessionId, interviewState.isCompletedAwaitingEvaluation]);
 
   // 3-Day wait period cooldown check for individually registered students
   useEffect(() => {
