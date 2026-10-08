@@ -1,326 +1,354 @@
 /**
- * WebSocket interview endpoint: /ws/interview?token=<jwt>&sessionId=<uuid>
+ * Live interview WebSocket gateway — ws(s)://<host>/ws/interview?sessionId=<uuid>&token=<jwt>
  *
- * Auth:    JWT in query param (WS upgrades cannot send Authorization header)
- * Session: verified against assessment.assessment_attempts so only the owning
- *          student can connect (STUDENT role enforced; staff/mentor may observe)
+ * Browser → server:
+ *   { type: 'audio_start', metadata: { domain? } }        start of an answer
+ *   <binary>                                               MediaRecorder audio chunks
+ *   { type: 'audio_end', transcript?, durationSec?, pauseCount?, longestPauseSec?, responseLatencySec? }
+ *   { type: 'finish', ...same fields }                    time is up / end now
+ *   { type: 'proctor_event', event: 'TAB_SWITCH' | 'FULLSCREEN_EXIT' }
+ * Server → browser:
+ *   ready, transcript_interim, status, clarification, turn_result (report on the
+ *   last turn), interview_complete, proctor_warning, terminated, error
  *
- * Binary frames → Deepgram streaming STT
- * JSON frames   → control messages (start_interview, audio_end, submit_transcript)
+ * Speech-to-text: Deepgram when DEEPGRAM_API_KEY is set (server transcribes the
+ * audio stream); otherwise the browser transcribes and sends `transcript` with
+ * audio_end. The question, difficulty and turn number always come from the
+ * server-side interview state, never from the client.
  */
 
-import { IncomingMessage } from 'http';
-import { WebSocket, WebSocketServer } from 'ws';
-import jwt from 'jsonwebtoken';
+import http from 'http';
+import { Duplex } from 'stream';
+import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { env } from '../config/env';
+import jwt from 'jsonwebtoken';
+import { AppError } from '../shared/errors/AppError';
 import { db } from '../shared/db/pool';
-import { wsManager } from '../services/wsManager';
-import { sessionContextService } from '../services/sessionContextService';
-import * as deepgramService from '../services/deepgramService';
-import { triggerLLMEvaluation } from '../services/llmEvaluationService';
-import type { JWTPayload } from '../shared/types/auth';
+import { wsManager } from './wsManager';
+import * as deepgramService from './deepgramService';
+import type { AudioStartMeta } from './deepgramService';
+import { triggerLLMEvaluation, finishInterview, recordProctorEvent, DeliveryMetrics } from './llmEvaluationService';
+import { sessionContextService } from './sessionContextService';
+import { loadOwnedSession, OwnedSession } from './interviewSessionService';
 
-// ── JWT verification (no middleware chain for WS) ─────────────────────────────
+const PATH_RE = /^\/ws\/interview\/?$/;
+const MAX_TRANSCRIPT_CHARS = 5000;
+const MAX_BUFFERED_AUDIO_BYTES = 5 * 1024 * 1024;
+const MAX_PENDING_MESSAGES = 200;
+// After audio_end, give Deepgram a moment to deliver its last final result
+const DEEPGRAM_FLUSH_MS = 750;
+const KEEPALIVE_MS = 25_000;
 
-async function verifyToken(token: string): Promise<JWTPayload | null> {
+interface Turn {
+  meta: AudioStartMeta | null;
+  ready: Promise<void>;
+  done: boolean;
+  // Audio received before the Deepgram stream is open (the first chunk carries the WebM header)
+  bufferedAudio: Buffer[];
+  bufferedBytes: number;
+  streamOpen: boolean;
+}
+
+function toBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.from(data);
+}
+
+// Application close codes (4000-4999); the reason is shown to the student.
+function closeFor(err: unknown): { code: number; reason: string } {
+  if (err instanceof AppError) {
+    const codes: Record<number, number> = { 401: 4401, 403: 4403, 404: 4404, 409: 4409 };
+    if (codes[err.statusCode]) return { code: codes[err.statusCode], reason: err.message.slice(0, 120) };
+  }
+  console.error('[interviewGateway] connection error:', err);
+  return { code: 1011, reason: 'Interview service error' };
+}
+
+async function authorize(token: string | null, sessionId: string): Promise<OwnedSession> {
+  if (!token) throw new AppError(401, 'Missing access token', 'UNAUTHENTICATED');
+
+  let decoded: any;
   try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as JWTPayload;
+    decoded = jwt.verify(token, env.JWT_SECRET) as any;
     const { rows } = await db.query<{ token_version: number; status: string }>(
       'SELECT token_version, status FROM identity.users WHERE id = $1',
       [decoded.id],
     );
-    if (rows.length === 0) return null;
-    if (rows[0].status === 'SUSPENDED') return null;
-    if (rows[0].token_version !== decoded.tokenVersion) return null;
-    return decoded;
+    if (!rows.length || rows[0].status === 'SUSPENDED' || rows[0].token_version !== decoded.tokenVersion) {
+      throw new Error('invalid token');
+    }
   } catch {
-    return null;
-  }
-}
-
-// ── Session ownership check ───────────────────────────────────────────────────
-
-async function verifySessionOwnership(
-  sessionId: string,
-  userId: string,
-  role: string,
-): Promise<{ studentId: string } | null> {
-  // Staff / mentor roles may observe any session
-  if (role !== 'STUDENT') {
-    const { rows } = await db.query(
-      `SELECT aa.student_id
-       FROM session.assessment_sessions ss
-       JOIN assessment.assessment_attempts aa ON aa.id = ss.attempt_id
-       WHERE ss.id = $1`,
-      [sessionId],
-    );
-    if (rows.length === 0) return null;
-    return { studentId: rows[0].student_id };
+    throw new AppError(401, 'Invalid or expired token', 'UNAUTHENTICATED');
   }
 
-  // STUDENT may only connect to their own session
-  const { rows } = await db.query(
-    `SELECT aa.student_id
-     FROM session.assessment_sessions ss
-     JOIN assessment.assessment_attempts aa ON aa.id = ss.attempt_id
-     JOIN org.students s ON s.id = aa.student_id
-     WHERE ss.id = $1 AND s.user_id = $2`,
-    [sessionId, userId],
-  );
-  if (rows.length === 0) return null;
-  return { studentId: rows[0].student_id };
-}
-
-// ── Resume loader ─────────────────────────────────────────────────────────────
-
-async function loadResumeIntoContext(
-  sessionId: string,
-  studentId: string,
-): Promise<void> {
-  // Check if already cached in Redis
-  const existing = await sessionContextService.getResume(sessionId);
-  if (existing && Object.keys(existing).length > 0) return;
-
-  const { rows } = await db.query(
-    'SELECT parsed_resume FROM org.students WHERE id = $1',
-    [studentId],
-  );
-  const resume = rows[0]?.parsed_resume ?? {};
-  if (resume && Object.keys(resume).length > 0) {
-    await sessionContextService.setResume(sessionId, resume);
+  if (decoded.role !== 'STUDENT') {
+    throw new AppError(403, 'Only students can join an interview', 'FORBIDDEN');
   }
+  return loadOwnedSession(sessionId, decoded.id);
 }
 
-// ── Topic curriculum builder (uses beginner resume skills) ───────────────────
+function handleConnection(ws: WebSocket, sessionId: string, token: string | null): void {
+  const useDeepgram = Boolean(env.DEEPGRAM_API_KEY);
+  let session: OwnedSession | null = null;
+  let turn: Turn | null = null;
+  const pending: Array<[RawData, boolean]> = [];
 
-async function buildTopicCurriculum(studentId: string): Promise<string[]> {
-  try {
-    const { rows } = await db.query(
-      'SELECT parsed_resume FROM org.students WHERE id = $1',
-      [studentId],
-    );
-    const resume = rows[0]?.parsed_resume;
-    if (!resume) return ['General Programming'];
+  const emitError = (message: string) => wsManager.emit(sessionId, { type: 'error', message });
 
-    const topics: string[] = [];
-    const langs: string[] = resume.skills?.languages ?? [];
-    const fundamentals: string[] = resume.skills?.fundamentals ?? [];
-    const cs: string[] = resume.skills?.cs_fundamentals ?? [];
+  const finishTurn = async (
+    current: Turn,
+    transcript: string,
+    options: DeliveryMetrics & { isFinal?: boolean } = {},
+  ): Promise<void> => {
+    if (current.done || !current.meta || !session) return;
+    current.done = true;
+    if (useDeepgram) deepgramService.closeSession(sessionId);
 
-    // Primary language topics (up to 3)
-    for (const lang of langs.slice(0, 3)) {
-      topics.push(lang);
-    }
-    // CS fundamentals as grouped topics
-    if (cs.some((s: string) => s.toLowerCase().includes('dbms') || s.toLowerCase().includes('sql'))) {
-      topics.push('DBMS & SQL');
-    }
-    if (cs.some((s: string) => s.toLowerCase().includes('network'))) {
-      topics.push('Computer Networks');
-    }
-    if (cs.some((s: string) => s.toLowerCase().includes('operating'))) {
-      topics.push('Operating Systems');
-    }
-    if (fundamentals.length > 0) {
-      topics.push('Programming Fundamentals');
-    }
-    return topics.length > 0 ? topics : ['General Programming'];
-  } catch {
-    return ['General Programming'];
-  }
-}
-
-// ── Active Deepgram turn tracker ──────────────────────────────────────────────
-
-interface ActiveTurn {
-  questionText: string;
-  difficulty: 'EASY' | 'MEDIUM' | 'ADVANCED';
-  turnNumber: number;
-  domain?: string;
-}
-
-const activeTurns = new Map<string, ActiveTurn>();
-
-// ── WS connection handler ─────────────────────────────────────────────────────
-
-async function handleConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
-  const url = new URL(req.url ?? '/', `http://localhost`);
-  const token = url.searchParams.get('token');
-  const sessionId = url.searchParams.get('sessionId');
-
-  const reject = (msg: string) => {
     try {
-      ws.send(JSON.stringify({ type: 'error', message: msg }));
-    } catch {}
-    ws.close(4001, msg);
+      await triggerLLMEvaluation(sessionId, transcript.trim().slice(0, MAX_TRANSCRIPT_CHARS), current.meta, options);
+    } catch (err) {
+      console.error('[interviewGateway] evaluation error:', err);
+      emitError('Could not evaluate your answer. Please answer the question again.');
+    }
   };
 
-  if (!token || !sessionId) {
-    reject('token and sessionId are required');
-    return;
-  }
+  const startTurn = (message: Record<string, unknown>): void => {
+    const clientMeta = (message.metadata ?? message) as Record<string, unknown>;
+    if (useDeepgram) deepgramService.closeSession(sessionId);
 
-  const user = await verifyToken(token);
-  if (!user) {
-    reject('Authentication failed');
-    return;
-  }
+    const current: Turn = {
+      meta: null,
+      ready: Promise.resolve(),
+      done: false,
+      bufferedAudio: [],
+      bufferedBytes: 0,
+      streamOpen: false,
+    };
+    turn = current;
 
-  const ownership = await verifySessionOwnership(sessionId, user.id, user.role);
-  if (!ownership) {
-    reject('Session not found or access denied');
-    return;
-  }
+    current.ready = (async () => {
+      const state = await sessionContextService.getState(sessionId);
+      if (!state) {
+        current.done = true;
+        emitError('This interview session has ended or expired. Please start a new interview.');
+        return;
+      }
 
-  const { studentId } = ownership;
+      if (!state.current_question) {
+        const bootstrapQuestion =
+          typeof clientMeta.question_text === 'string' ? clientMeta.question_text.trim().slice(0, 500) : '';
+        const bootstrapDifficulty =
+          clientMeta.difficulty === 'MEDIUM' || clientMeta.difficulty === 'ADVANCED' ? clientMeta.difficulty : 'EASY';
+        state.current_question = bootstrapQuestion || 'Tell me about yourself. Walk me through your background and the key skills you have built.';
+        state.current_difficulty = bootstrapDifficulty as any;
+        state.current_question_turn = state.current_turn || 1;
+        state.current_category = 'Introduction';
+        state.do_not_ask_or_repeat = [state.current_question];
+        await sessionContextService.setState(sessionId, state);
+      }
 
-  // Register the WS for server→client pushes
-  wsManager.register(sessionId, ws);
+      current.meta = {
+        questionText: state.current_question,
+        difficulty: state.current_difficulty,
+        turnNumber: state.current_turn,
+        studentId: session!.studentId,
+        domain: typeof clientMeta.domain === 'string' ? clientMeta.domain.slice(0, 100) : undefined,
+      };
 
-  ws.send(JSON.stringify({ type: 'connected', sessionId }));
-  console.log(`[WS] connected  sessionId=${sessionId}  userId=${user.id}  studentId=${studentId}`);
+      if (useDeepgram) {
+        await deepgramService.openSession(sessionId, current.meta, (transcript) => finishTurn(current, transcript));
+        current.streamOpen = true;
+        for (const chunk of current.bufferedAudio) deepgramService.sendAudio(sessionId, chunk);
+        current.bufferedAudio = [];
+      }
+    })().catch((err) => {
+      console.error('[interviewGateway] audio_start error:', err);
+      current.done = true;
+      emitError('Could not start listening. Please try again.');
+    });
+  };
 
-  ws.on('message', async (data: Buffer | string, isBinary: boolean) => {
-    // In ws v8, ALL frames arrive as Buffer regardless of text/binary.
-    // Use the isBinary flag (not Buffer.isBuffer) to distinguish audio from JSON.
+  const endTurn = async (message: Record<string, unknown>, isFinal = false): Promise<void> => {
+    const current = turn;
+    if (!current) {
+      if (isFinal) await finishInterview(sessionId);
+      return;
+    }
+    await current.ready;
+    if (current.done) {
+      if (isFinal) await finishInterview(sessionId);
+      return;
+    }
+
+    let serverTranscript = '';
+    if (useDeepgram) {
+      await new Promise((resolve) => setTimeout(resolve, DEEPGRAM_FLUSH_MS));
+      if (current.done) { if (isFinal) await finishInterview(sessionId); return; }
+      serverTranscript = deepgramService.closeSession(sessionId);
+    }
+    const clientTranscript = typeof message.transcript === 'string' ? message.transcript : '';
+    // Delivery measured by the browser: speaking time (→ WPM), long pauses, response latency
+    const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+    await finishTurn(current, serverTranscript || clientTranscript, {
+      durationSec: num(message.durationSec),
+      pauseCount: num(message.pauseCount),
+      longestPauseSec: num(message.longestPauseSec),
+      responseLatencySec: num(message.responseLatencySec),
+      isFinal,
+    });
+  };
+
+  const onMessage = (data: RawData, isBinary: boolean): void => {
     if (isBinary) {
-      // Binary frame: raw audio chunk from MediaRecorder → forward to Deepgram
-      deepgramService.sendAudio(sessionId, Buffer.isBuffer(data) ? data : Buffer.from(data as unknown as ArrayBuffer));
+      const current = turn;
+      if (!useDeepgram || !current || current.done) return;
+      const chunk = toBuffer(data);
+      if (current.streamOpen) {
+        deepgramService.sendAudio(sessionId, chunk);
+      } else if (current.bufferedBytes + chunk.length <= MAX_BUFFERED_AUDIO_BYTES) {
+        current.bufferedAudio.push(chunk);
+        current.bufferedBytes += chunk.length;
+      }
       return;
     }
 
-    // Text frame: JSON control message
-    let msg: Record<string, unknown>;
+    let message: Record<string, unknown>;
     try {
-      msg = JSON.parse(data.toString());
+      message = JSON.parse(data.toString());
     } catch {
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON frame' }));
       return;
     }
+    if (message.type === 'audio_start') {
+      startTurn(message);
+    } else if (message.type === 'audio_end') {
+      endTurn(message).catch((err) => console.error('[interviewGateway] audio_end error:', err));
+    } else if (message.type === 'finish') {
+      endTurn(message, true).catch((err) => console.error('[interviewGateway] finish error:', err));
+    } else if (message.type === 'proctor_event') {
+      const event = message.event === 'FULLSCREEN_EXIT' ? 'FULLSCREEN_EXIT' : 'TAB_SWITCH';
+      recordProctorEvent(sessionId, event).catch((err) => console.error('[interviewGateway] proctor error:', err));
+    }
+  };
 
-    switch (msg.type) {
-      case 'start_interview': {
-        const questionText = (msg.question_text as string) ?? 'Tell me about yourself';
-        const difficulty = ((msg.difficulty as string) ?? 'EASY') as 'EASY' | 'MEDIUM' | 'ADVANCED';
-        const turnNumber = (msg.turn_number as number) ?? 1;
-        const domain = (msg.domain as string | undefined) ?? 'Technical';
-
-        // Track active turn FIRST so submit_transcript can find it even if
-        // loadResumeIntoContext (async, Redis) is still in flight.
-        activeTurns.set(sessionId, { questionText, difficulty, turnNumber, domain });
-
-        // Load resume once per session (non-blocking from perspective of activeTurns)
-        await loadResumeIntoContext(sessionId, studentId);
-
-        // Initialize session state in Redis on turn 1 (drives topic curriculum + difficulty)
-        if (turnNumber <= 1) {
-          const existingState = await sessionContextService.getState(sessionId).catch(() => null);
-          if (!existingState) {
-            const curriculum = await buildTopicCurriculum(studentId);
-            await sessionContextService.setState(sessionId, {
-              session_id: sessionId,
-              student_id: studentId,
-              topic_curriculum: curriculum,
-              completed_topics: [],
-              active_topic: curriculum[0] ?? 'General Programming',
-              active_topic_question_count: 0,
-              max_questions_per_topic: 4,
-              do_not_ask_or_repeat: [],
-              current_turn: 1,
-              max_turns: 10,
-              current_difficulty: 'EASY',
-              candidate_performance_trend: 'stable',
-              consecutive_weak_answers: 0,
-              current_question: questionText,
-              current_question_turn: 1,
-              current_rubric: {},
-              rolling_overall_score: 0,
-              rolling_score_turns: 0,
-            });
-            console.log(`[WS] Session state initialized sessionId=${sessionId} topics=[${curriculum.join(', ')}]`);
-          }
-        }
-
-        // Open Deepgram streaming session
-        await deepgramService.openSession(
-          sessionId,
-          { questionText, difficulty, turnNumber, studentId, domain },
-          async (transcript, meta) => {
-            activeTurns.delete(sessionId);
-            await triggerLLMEvaluation(sessionId, transcript, meta);
-          },
-        );
-
-        ws.send(JSON.stringify({ type: 'recording_started', turnNumber }));
-        break;
-      }
-
-      case 'audio_end': {
-        // Student stopped speaking — close Deepgram stream (triggers UtteranceEnd)
-        deepgramService.closeSession(sessionId);
-        break;
-      }
-
-      case 'submit_transcript': {
-        // Text fallback path: frontend sends transcript directly (no Deepgram)
-        const transcript = ((msg.transcript as string) ?? '').trim();
-        if (!transcript) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Empty transcript' }));
-          break;
-        }
-
-        const turn = activeTurns.get(sessionId);
-        if (!turn) {
-          ws.send(JSON.stringify({ type: 'error', message: 'No active turn — send start_interview first' }));
-          break;
-        }
-
-        activeTurns.delete(sessionId);
-        await loadResumeIntoContext(sessionId, studentId);
-
-        await triggerLLMEvaluation(sessionId, transcript, {
-          questionText: turn.questionText,
-          difficulty: turn.difficulty,
-          turnNumber: turn.turnNumber,
-          studentId,
-          domain: turn.domain,
-        });
-        break;
-      }
-
-      default:
-        ws.send(JSON.stringify({ type: 'error', message: `Unknown message type: ${msg.type}` }));
+  // Messages can arrive while auth is still running — queue them until then.
+  ws.on('message', (data: RawData, isBinary: boolean) => {
+    if (session) {
+      onMessage(data, isBinary);
+    } else if (pending.length < MAX_PENDING_MESSAGES) {
+      pending.push([data, isBinary]);
     }
   });
+
+  // Proxies (nginx: proxy_read_timeout, 60 s by default) drop idle sockets, and with
+  // browser speech recognition nothing is sent while the candidate thinks. Ping keeps it open.
+  const keepAlive = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
+  }, KEEPALIVE_MS);
 
   ws.on('close', () => {
-    console.log(`[WS] disconnected  sessionId=${sessionId}`);
-    wsManager.unregister(sessionId);
-    activeTurns.delete(sessionId);
-    deepgramService.closeSession(sessionId);
+    clearInterval(keepAlive);
+    if (wsManager.get(sessionId) === ws && useDeepgram) deepgramService.closeSession(sessionId);
+    wsManager.unregister(sessionId, ws);
   });
 
-  ws.on('error', (err) => {
-    console.error(`[WS] error  sessionId=${sessionId}:`, err.message);
-  });
+  authorize(token, sessionId)
+    .then(async (owned) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      session = owned;
+
+      // Main repo historically creates the session before the first question endpoint runs.
+      // Bootstrap server state once from that first question; every later turn is server-owned.
+      let state = await sessionContextService.getState(sessionId);
+      if (!state) {
+        const { rows } = await db.query<{ name: string; parsed_resume: any }>(
+          `SELECT u.name, s.parsed_resume
+           FROM org.students s
+           JOIN identity.users u ON u.id = s.user_id
+           WHERE s.id = $1`,
+          [owned.studentId],
+        );
+        const parsedResume = rows[0]?.parsed_resume ?? {};
+        const skills = [
+          ...(parsedResume?.skills?.languages ?? []),
+          ...(parsedResume?.skills?.frameworks ?? []),
+        ].filter((v: unknown): v is string => typeof v === 'string').slice(0, 20);
+        const projects = (parsedResume?.projects ?? []).slice(0, 5).map((p: any) => ({
+          title: String(p?.title ?? '').slice(0, 120),
+          tech_stack: Array.isArray(p?.techStack) ? p.techStack.filter((v: unknown): v is string => typeof v === 'string').slice(0, 10) : [],
+          description: String(p?.description ?? '').slice(0, 400),
+        }));
+
+        state = {
+          session_id: sessionId,
+          student_id: owned.studentId,
+          topic_curriculum: skills.length ? skills.slice(0, 5) : ['General Programming'],
+          completed_topics: [],
+          active_topic: skills[0] || 'General Programming',
+          active_topic_question_count: 0,
+          max_questions_per_topic: 3,
+          do_not_ask_or_repeat: [],
+          current_turn: 1,
+          max_turns: env.MAX_QUESTIONS_PER_SESSION,
+          current_difficulty: 'EASY',
+          candidate_performance_trend: 'stable',
+          consecutive_weak_answers: 0,
+          current_question: '',
+          current_question_turn: 1,
+          current_rubric: {},
+          status: 'ACTIVE',
+          attempt_id: owned.attemptId,
+          resume: { name: rows[0]?.name ?? 'Candidate', skills, projects },
+          current_category: 'Introduction',
+          current_key_points: [],
+          turn_results: [],
+          clarifications_this_turn: 0,
+          consecutive_ai_failures: 0,
+          tab_switches: 0,
+          fullscreen_exits: 0,
+        };
+        await sessionContextService.setState(sessionId, state);
+      }
+      const previous = wsManager.get(sessionId);
+      if (previous && previous !== ws) previous.close(4000, 'Interview opened in another window');
+      wsManager.register(sessionId, ws);
+      // On a reconnect the browser resyncs to the server's current question
+      const state = await sessionContextService.getState(sessionId);
+      ws.send(JSON.stringify({
+        type: 'ready',
+        stt: useDeepgram ? 'deepgram' : 'client',
+        turnNumber: state?.current_turn ?? 1,
+        totalTurns: state?.max_turns ?? null,
+        questionText: state?.current_question ?? '',
+        difficulty: state?.current_difficulty ?? 'EASY',
+      }));
+      console.log(`[interviewGateway] connected session=${sessionId} stt=${useDeepgram ? 'deepgram' : 'client'}`);
+      for (const [data, isBinary] of pending.splice(0)) onMessage(data, isBinary);
+    })
+    .catch((err) => {
+      const { code, reason } = closeFor(err);
+      ws.close(code, reason);
+    });
 }
 
-// ── Factory: attach WS server to existing HTTP server ─────────────────────────
+export function createInterviewWsServer(server: http.Server): WebSocketServer {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
 
-export function createInterviewWsServer(httpServer: import('http').Server): WebSocketServer {
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/interview' });
-
-  wss.on('connection', (ws, req) => {
-    handleConnection(ws, req).catch((err) => {
-      console.error('[WS] unhandled connection error:', err);
-      try { ws.close(1011, 'Internal error'); } catch {}
+  server.on('upgrade', (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    if (!PATH_RE.test(url.pathname)) {
+      socket.destroy();
+      return;
+    }
+    const sessionId = url.searchParams.get('sessionId');
+    if (!sessionId) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      handleConnection(ws, sessionId, url.searchParams.get('token'));
     });
   });
 
-  wss.on('error', (err) => {
-    console.error('[WS] server error:', err);
-  });
-
-  console.log('[WS] interview server attached at /ws/interview');
   return wss;
 }
