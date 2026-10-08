@@ -165,6 +165,52 @@ studentRouter.patch(
   }
 );
 
+// ── GET /api/students/:studentId/resume ───────────────────────────────────────
+
+studentRouter.get(
+  '/:studentId/resume',
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const studentId = req.params.studentId as string;
+
+      // Verify student exists
+      const { rows: existing } = await db.query(
+        'SELECT id FROM org.students WHERE id = $1',
+        [studentId]
+      );
+      if (existing.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+
+      // Students: own resume only; mentors: assigned students only; staff: any student
+      await assertStudentAccess(req.user!, studentId);
+
+      // Fetch current resume with parsed data
+      const { rows: resumes } = await db.query(
+        `SELECT id, file_name, parsed_data, created_at
+         FROM org.resumes
+         WHERE student_id = $1 AND is_current = true
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [studentId]
+      );
+
+      if (resumes.length === 0) {
+        sendSuccess(res, { resume: null });
+        return;
+      }
+
+      const resume = resumes[0];
+      sendSuccess(res, {
+        id: resume.id,
+        fileName: resume.file_name,
+        parsedData: resume.parsed_data,
+        parsedAt: resume.created_at.toISOString().split('T')[0]
+      });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
 // ── PATCH /api/students/:studentId/resume ─────────────────────────────────────
 
 studentRouter.patch(

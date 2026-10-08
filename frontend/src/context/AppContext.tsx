@@ -913,6 +913,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, currentUser?.role]);
 
+  // Fetch resume from database when student logs in
+  useEffect(() => {
+    if (isAuthenticated && student.id && !student.resume && currentUser?.role === 'STUDENT') {
+      void fetchStudentResume(student.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, student.id]);
+
   // 3-Day wait period cooldown check for individually registered students
   useEffect(() => {
     const checkIndependentCooldown = () => {
@@ -1710,33 +1718,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   };
 
+  const fetchStudentResume = async (studentId: string): Promise<void> => {
+    try {
+      const response = await api.student.getResume(studentId);
+      if (response && response.parsedData) {
+        const frontendResume: ParsedResume = {
+          fileName: response.fileName || 'Resume.pdf',
+          parsedAt: response.parsedAt || new Date().toISOString().split('T')[0],
+          summary: response.parsedData.summary || '',
+          skills: {
+            languages: response.parsedData.skills?.languages || [],
+            frameworks: response.parsedData.skills?.frameworks || [],
+            databases: response.parsedData.skills?.databases || [],
+            tools: response.parsedData.skills?.tools || []
+          },
+          projects: response.parsedData.projects || [],
+          experience: response.parsedData.experience || [],
+          education: response.parsedData.education || [],
+          certifications: response.parsedData.certifications || [],
+          links: response.parsedData.links || {}
+        };
+        setStudent(prev => ({ ...prev, resume: frontendResume }));
+      }
+    } catch (err) {
+      console.log('No resume found for student');
+    }
+  };
+
   const uploadResumeData = async (payload: FormData | { resumeText: string; fileName?: string } | ParsedResume): Promise<ParsedResume> => {
     let parsed: ParsedResume;
     try {
       parsed = await api.student.uploadResume(student.id || 'stu-21cs1084', payload);
-    } catch {
-      if ('skills' in payload && 'projects' in payload) {
-        parsed = payload as ParsedResume;
-      } else {
-        parsed = {
-          fileName: 'Uploaded_Resume.pdf',
-          parsedAt: new Date().toISOString().split('T')[0],
-          summary: 'Full-Stack Developer with hands-on experience in Java, Spring Boot, React, and scalable cloud applications.',
-          skills: {
-            languages: ['Java', 'TypeScript', 'SQL'],
-            frameworks: ['Spring Boot', 'React', 'Tailwind CSS'],
-            databases: ['PostgreSQL', 'Redis'],
-            tools: ['Git', 'Docker']
-          },
-          projects: [
-            {
-              title: 'College Placement Readiness Engine',
-              description: 'Real-time diagnostic assessment platform',
-              techStack: ['React', 'Node.js', 'PostgreSQL']
-            }
-          ]
-        };
-      }
+    } catch (error) {
+      console.error('[uploadResume] Upload failed:', error);
+      // CRITICAL FIX: Do NOT return fake demo data on error
+      // Let the error propagate so UI can show proper error message
+      throw error;
     }
     setStudent(prev => ({ ...prev, resume: parsed }));
     return parsed;

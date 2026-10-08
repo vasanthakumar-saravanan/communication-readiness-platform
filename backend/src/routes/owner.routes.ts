@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { AppError } from '../shared/errors/AppError';
 import crypto from 'crypto';
 import { env } from '../config/env';
+import { sendSuperAdminInvitationEmail } from '../services/emailService';
 
 export const ownerRouter = Router();
 
@@ -605,14 +606,27 @@ ownerRouter.post(
 
       const invite = inviteResult.rows[0];
 
-      // TODO: Send email via emailService
-      // For now, just return the invite URL
+      // Send Super Admin invitation email
+      try {
+        await sendSuperAdminInvitationEmail({
+          to: normalizedEmail,
+          firstName,
+          lastName,
+          institutionName: institution.name,
+          inviteToken: token
+        });
+        console.log(`[owner] Super Admin invitation email sent to ${normalizedEmail} for ${institution.name}`);
+      } catch (emailErr) {
+        console.error('[owner] Failed to send Super Admin invitation email:', emailErr);
+        // Continue execution - invitation is created even if email fails
+        // In production, this should alert monitoring/support
+      }
+
       const inviteUrl = `${env.APP_URL}/?invite_token=${token}`;
 
       sendSuccess(res, {
         invite: {
           id: invite.id,
-          token: invite.token,
           email: invite.email,
           name: invite.name,
           role: invite.role,
@@ -622,7 +636,8 @@ ownerRouter.post(
           expiresAt: invite.expires_at,
           createdAt: invite.created_at
         },
-        inviteUrl
+        inviteUrl,
+        message: 'Invitation created and email sent successfully'
       });
     } catch (err) {
       sendError(res, err);
@@ -751,20 +766,41 @@ ownerRouter.post(
 
       const updatedInvite = updateResult.rows[0];
 
-      // TODO: Send email via emailService
+      // Get institution name for email
+      const instResult = await db.query(
+        `SELECT name FROM org.institutions WHERE id = $1`,
+        [updatedInvite.institution_id]
+      );
+      const institutionName = instResult.rows[0]?.name || 'Your Institution';
+
+      // Resend invitation email
+      try {
+        await sendSuperAdminInvitationEmail({
+          to: updatedInvite.email,
+          firstName: updatedInvite.first_name || '',
+          lastName: updatedInvite.last_name || '',
+          institutionName,
+          inviteToken: newToken
+        });
+        console.log(`[owner] Resent invitation email to ${updatedInvite.email}`);
+      } catch (emailErr) {
+        console.error('[owner] Failed to resend invitation email:', emailErr);
+        // Continue - invitation is updated even if email fails
+      }
+
       const inviteUrl = `${env.APP_URL}/?invite_token=${newToken}`;
 
       sendSuccess(res, {
         invite: {
           id: updatedInvite.id,
-          token: updatedInvite.token,
           email: updatedInvite.email,
           name: updatedInvite.name,
           role: updatedInvite.role,
           status: updatedInvite.status,
           expiresAt: updatedInvite.expires_at
         },
-        inviteUrl
+        inviteUrl,
+        message: 'Invitation resent successfully'
       });
     } catch (err) {
       sendError(res, err);

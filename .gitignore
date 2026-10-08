@@ -49,3 +49,10 @@ ROADMAP.md
 
 # Local archives
 *.zip
+QA_CREDENTIALS_DO_NOT_COMMIT.txt
+QA_RESUME_TEST_CREDENTIALS.txt
+backend/create-qa-resume-student.js
+
+# QA credentials (LOCAL ONLY - never commit)
+docs/QA_ALL_CREDENTIALS_LOCAL.md
+**/QA_ALL_CREDENTIALS_LOCAL.md

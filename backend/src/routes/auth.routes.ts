@@ -13,6 +13,7 @@ import { UserRole } from '../shared/types/roles';
 import { AuthUser } from '../shared/types/auth';
 import { lockedForSeconds, recordFailure, clearFailures } from '../shared/security/loginThrottle';
 import crypto from 'crypto';
+import { sendPasswordResetEmail } from '../services/emailService';
 
 export const authRouter = Router();
 
@@ -347,6 +348,181 @@ authRouter.post('/accept-invite', async (req: Request, res: Response): Promise<v
       sendError(res, err);
       return;
     }
+    sendError(res, err);
+  } finally {
+    client.release();
+  }
+});
+
+// ── POST /api/auth/forgot-password ────────────────────────────────────────────
+// Request a password reset. Generates a secure token, stores it hashed, and sends
+// an email with the reset link. Always returns success to prevent email enumeration.
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email().transform(s => s.toLowerCase())
+});
+
+authRouter.post('/forgot-password', async (req: Request, res: Response): Promise<void> => {
+  const parsed = forgotPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    sendError(res, new AppError(422, 'Validation failed', 'VALIDATION_ERROR'));
+    return;
+  }
+  const { email } = parsed.data;
+  const ip = req.ip ?? 'unknown';
+
+  try {
+    // Rate limiting: check if too many reset requests from this IP
+    const lockSeconds = lockedForSeconds(ip, `pwd_reset_${email}`);
+    if (lockSeconds > 0) {
+      throw new AppError(429, `Too many password reset attempts. Try again in ${Math.ceil(lockSeconds / 60)} minute(s).`, 'TOO_MANY_ATTEMPTS');
+    }
+
+    // Look up user by email
+    const { rows } = await db.query<{ id: string; name: string; email: string; status: string }>(
+      'SELECT id, name, email, status FROM identity.users WHERE email = $1',
+      [email]
+    );
+
+    // IMPORTANT: Always return success even if email doesn't exist (prevents email enumeration)
+    if (rows.length === 0) {
+      // Record fake "failure" to apply rate limiting consistently
+      recordFailure(ip, `pwd_reset_${email}`);
+      sendSuccess(res, { message: 'If an account with that email exists, a password reset link has been sent.' });
+      return;
+    }
+
+    const user = rows[0];
+
+    // Don't allow password reset for suspended accounts
+    if (user.status === 'SUSPENDED') {
+      recordFailure(ip, `pwd_reset_${email}`);
+      sendSuccess(res, { message: 'If an account with that email exists, a password reset link has been sent.' });
+      return;
+    }
+
+    // Invalidate any previous outstanding reset tokens for this user
+    await db.query(
+      'UPDATE identity.password_reset_tokens SET used_at = now() WHERE user_id = $1 AND used_at IS NULL',
+      [user.id]
+    );
+
+    // Generate cryptographically secure reset token (64 hex chars = 32 bytes)
+    const resetToken = crypto.randomBytes(32).toString('hex');
+
+    // Hash the token before storing (never store raw tokens in database)
+    const tokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
+
+    // Store hashed token with 15-minute expiration
+    await db.query(
+      `INSERT INTO identity.password_reset_tokens (user_id, token_hash, expires_at, request_ip)
+       VALUES ($1, $2, now() + interval '15 minutes', $3)`,
+      [user.id, tokenHash, ip]
+    );
+
+    // Send password reset email
+    try {
+      await sendPasswordResetEmail({
+        to: user.email,
+        name: user.name,
+        resetToken // Send raw token in email (this is the credential being delivered)
+      });
+      clearFailures(ip, `pwd_reset_${email}`);
+      console.log(`[auth] Password reset email sent to ${user.email}`);
+    } catch (emailErr) {
+      console.error('[auth] Failed to send password reset email:', emailErr);
+      // Don't expose email sending failures to the user
+      // In production, this should log to monitoring/alerting
+    }
+
+    // Always return success (never reveal whether email exists)
+    sendSuccess(res, { message: 'If an account with that email exists, a password reset link has been sent.' });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// ── POST /api/auth/reset-password ─────────────────────────────────────────────
+// Reset password using the token from email. Validates token, updates password,
+// increments token_version to invalidate existing JWT sessions, and marks token as used.
+
+const resetPasswordSchema = z.object({
+  token: z.string().length(64, 'Invalid reset token'),
+  newPassword: z.string().min(8, 'Password must be at least 8 characters')
+});
+
+authRouter.post('/reset-password', async (req: Request, res: Response): Promise<void> => {
+  const parsed = resetPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    sendError(res, new AppError(422, 'Validation failed', 'VALIDATION_ERROR'));
+    return;
+  }
+  const { token, newPassword } = parsed.data;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Hash the provided token to compare with stored hash
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    // Find valid, unused, non-expired token
+    const { rows: tokenRows } = await client.query<{
+      id: string; user_id: string; expires_at: Date; used_at: Date | null;
+    }>(
+      `SELECT id, user_id, expires_at, used_at
+       FROM identity.password_reset_tokens
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+       FOR UPDATE`,
+      [tokenHash]
+    );
+
+    if (tokenRows.length === 0) {
+      await client.query('ROLLBACK');
+      throw new AppError(400, 'Invalid or expired reset token. Please request a new password reset.', 'INVALID_TOKEN');
+    }
+
+    const resetRecord = tokenRows[0];
+
+    // Get user details
+    const { rows: userRows } = await client.query<{ id: string; name: string; email: string; status: string }>(
+      'SELECT id, name, email, status FROM identity.users WHERE id = $1',
+      [resetRecord.user_id]
+    );
+
+    if (userRows.length === 0 || userRows[0].status === 'SUSPENDED') {
+      await client.query('ROLLBACK');
+      throw new AppError(400, 'Cannot reset password for this account', 'INVALID_ACCOUNT');
+    }
+
+    const user = userRows[0];
+
+    // Hash new password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    // Update password and increment token_version (invalidates all existing JWT sessions)
+    await client.query(
+      `UPDATE identity.users
+       SET password_hash = $1, token_version = token_version + 1, updated_at = now()
+       WHERE id = $2`,
+      [passwordHash, user.id]
+    );
+
+    // Mark token as used (prevents reuse)
+    await client.query(
+      'UPDATE identity.password_reset_tokens SET used_at = now() WHERE id = $1',
+      [resetRecord.id]
+    );
+
+    await client.query('COMMIT');
+
+    console.log(`[auth] Password reset successful for user ${user.id}`);
+
+    sendSuccess(res, {
+      message: 'Password reset successful. You can now log in with your new password.'
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
     sendError(res, err);
   } finally {
     client.release();

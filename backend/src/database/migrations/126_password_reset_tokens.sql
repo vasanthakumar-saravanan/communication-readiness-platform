@@ -15,6 +15,4 @@ CREATE TABLE IF NOT EXISTS identity.password_reset_tokens (
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id    ON identity.password_reset_tokens (user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at ON identity.password_reset_tokens (expires_at);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token_hash ON identity.password_reset_tokens (token_hash) WHERE used_at IS NULL;
-
--- Automatically clean up expired tokens (older than 24 hours) to prevent table bloat
-CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_cleanup ON identity.password_reset_tokens (created_at) WHERE created_at < now() - interval '24 hours';
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_created_at ON identity.password_reset_tokens (created_at);

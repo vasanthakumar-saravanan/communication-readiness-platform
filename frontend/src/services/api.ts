@@ -2171,21 +2171,15 @@ class ApiClient {
             fileName,
             parsedAt: new Date().toISOString().split('T')[0],
             summary: extractedLanguages.length > 0
-              ? `Specialized candidate with expertise in ${extractedLanguages.join(', ')} and ${extractedFrameworks.slice(0, 3).join(', ')}.`
-              : 'Software Engineering candidate with hands-on full-stack development experience.',
+              ? `Specialized candidate with expertise in ${extractedLanguages.join(', ')}${extractedFrameworks.length > 0 ? ' and ' + extractedFrameworks.slice(0, 3).join(', ') : ''}.`
+              : rawText.trim() ? 'Resume parsed. Please review extracted information.' : 'No content extracted from resume.',
             skills: {
-              languages: extractedLanguages.length > 0 ? extractedLanguages : ['Java', 'TypeScript', 'SQL', 'Python'],
-              frameworks: extractedFrameworks.length > 0 ? extractedFrameworks : ['Spring Boot', 'React', 'Tailwind CSS', 'Docker'],
-              databases: ['PostgreSQL', 'Redis'],
-              tools: ['Git', 'Docker', 'Kafka']
+              languages: extractedLanguages, // CRITICAL FIX: Empty array if no extraction (no fake data)
+              frameworks: extractedFrameworks, // CRITICAL FIX: Empty array if no extraction (no fake data)
+              databases: [], // CRITICAL FIX: Empty, not fake data
+              tools: [] // CRITICAL FIX: Empty, not fake data
             },
-            projects: [
-              {
-                title: rawText.includes('Platform') ? 'Communication & Placement Engine' : 'High-Throughput Distributed Microservice',
-                description: 'Designed and deployed low-latency transactional workflows with automated telemetry and resilience testing.',
-                techStack: extractedLanguages.concat(extractedFrameworks).slice(0, 4)
-              }
-            ]
+            projects: [] // CRITICAL FIX: Empty projects, not fake data
           };
         }
 
@@ -2197,6 +2191,19 @@ class ApiClient {
       } catch (error) {
         console.error('Failed to upload resume:', error);
         throw error;
+      }
+    },
+
+    getResume: async (studentId: string): Promise<{ id?: string; fileName?: string; parsedData?: any; parsedAt?: string } | null> => {
+      try {
+        const response = await this.request<{ id?: string; fileName?: string; parsedData?: any; parsedAt?: string }>(`/students/${studentId}/resume`, {
+          method: 'GET'
+        });
+        return response;
+      } catch (err) {
+        // Resume doesn't exist yet - return null
+        console.log('No resume found for student');
+        return null;
       }
     }
   };
