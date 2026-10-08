@@ -23,12 +23,17 @@ import { AssessmentActivityPage } from './components/assessment/AssessmentActivi
 import { AssessmentSubmissionsPage } from './components/assessment/AssessmentSubmissionsPage';
 import { StudentManagementDashboardModal } from './components/common/StudentManagementDashboardModal';
 import { InviteActivationPage } from './components/auth/InviteActivationPage';
+import { PasswordResetPage } from './components/auth/PasswordResetPage';
 
 const MainContent: React.FC = () => {
   const { isAuthenticated, activeRole, activeView, currentUser } = useApp();
 
   if (activeView === 'ACTIVATE_INVITE') {
     return <InviteActivationPage />;
+  }
+
+  if (activeView === 'PASSWORD_RESET') {
+    return <PasswordResetPage />;
   }
 
   if (!isAuthenticated) {

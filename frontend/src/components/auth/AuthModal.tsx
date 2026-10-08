@@ -62,11 +62,9 @@ export const AuthModal: React.FC = () => {
 
   // Forgot password state
   const [forgotEmail, setForgotEmail] = useState('');
-  const [forgotOtp, setForgotOtp] = useState('');
   const [forgotNewPassword, setForgotNewPassword] = useState('');
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
-  const [forgotStep, setForgotStep] = useState<'REQUEST_OTP' | 'VERIFY_AND_RESET'>('REQUEST_OTP');
-  const [simulatedOtp, setSimulatedOtp] = useState<string | null>(null);
+  const [forgotStep, setForgotStep] = useState<'REQUEST_RESET' | 'RESET_SENT'>('REQUEST_RESET');
   const [showForgotPwd, setShowForgotPwd] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -172,45 +170,10 @@ export const AuthModal: React.FC = () => {
     setLoading(true);
     try {
       const res = await api.auth.requestPasswordReset(forgotEmail.trim());
-      setSimulatedOtp(res.otp);
-      setForgotStep('VERIFY_AND_RESET');
-      setSuccessMsg(`Verification code generated for ${res.email}.`);
+      setForgotStep('RESET_SENT');
+      setSuccessMsg(res.message || 'Password reset link sent! Check your email.');
     } catch (err: any) {
-      setError(err?.message || 'Failed to request password reset code.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!forgotOtp.trim()) {
-      setError('Please enter the 6-digit verification code.');
-      return;
-    }
-    if (!forgotNewPassword || forgotNewPassword.length < 6) {
-      setError('New password must be at least 6 characters.');
-      return;
-    }
-    if (forgotNewPassword !== forgotConfirmPassword) {
-      setError('Passwords do not match.');
-      return;
-    }
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await api.auth.resetPassword({
-        email: forgotEmail.trim(),
-        otp: forgotOtp.trim(),
-        newPassword: forgotNewPassword
-      });
-      setSuccessMsg('Password updated successfully! Logging you in...');
-      setTimeout(() => {
-        loginWithAuthUser(res.user, res.token);
-        closeAuthModal();
-      }, 700);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to reset password. Please check your verification code.');
+      setError(err?.message || 'Failed to request password reset. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -508,10 +471,10 @@ export const AuthModal: React.FC = () => {
           {activeTab === 'FORGOT_PASSWORD' && (
             <div className="space-y-4">
               <div className="p-3.5 bg-neutral-50 border border-neutral-200 rounded-xl text-[11px] text-neutral-600 leading-relaxed">
-                <strong>Universal Account Recovery:</strong> Enter your registered email address (students, faculty staff, counsellors, or administrators). We will issue a 6-digit verification code to securely reset your password.
+                <strong>Universal Account Recovery:</strong> Enter your registered email address (students, faculty staff, counsellors, or administrators). We will send you a secure password reset link via email.
               </div>
 
-              {forgotStep === 'REQUEST_OTP' ? (
+              {forgotStep === 'REQUEST_RESET' ? (
                 <form onSubmit={handleRequestPasswordReset} className="space-y-3.5">
                   <div>
                     <label className="block text-xs font-medium text-neutral-700 mb-1">Registered Email Address *</label>
@@ -536,10 +499,10 @@ export const AuthModal: React.FC = () => {
                     {loading ? (
                       <>
                         <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                        <span>Generating Verification Code...</span>
+                        <span>Sending Reset Link...</span>
                       </>
                     ) : (
-                      <span>Send Password Reset Code</span>
+                      <span>Send Password Reset Link</span>
                     )}
                   </button>
 
@@ -554,111 +517,46 @@ export const AuthModal: React.FC = () => {
                   </div>
                 </form>
               ) : (
-                <form onSubmit={handleResetPasswordSubmit} className="space-y-3.5">
-                  {simulatedOtp && (
-                    <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-xl text-xs text-neutral-800 flex items-center justify-between">
-                      <span className="font-medium text-[11px] text-neutral-600">Verification Code:</span>
-                      <span className="font-mono text-xs font-bold bg-neutral-200 text-neutral-900 px-2 py-0.5 rounded">
-                        {simulatedOtp}
-                      </span>
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-700 mb-1">Email</label>
-                    <input
-                      type="email"
-                      disabled
-                      value={forgotEmail}
-                      className="w-full px-3 py-2 bg-neutral-100 border border-neutral-200 rounded-xl text-xs text-neutral-600 font-mono"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-700 mb-1">6-Digit Verification Code *</label>
-                    <div className="relative">
-                      <KeyRound className="w-3.5 h-3.5 absolute left-3 top-3 text-neutral-400" />
-                      <input
-                        type="text"
-                        required
-                        maxLength={6}
-                        value={forgotOtp}
-                        onChange={(e) => setForgotOtp(e.target.value)}
-                        placeholder="e.g. 123456"
-                        className="w-full pl-9 pr-3 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900 transition-colors"
-                      />
+                <div className="space-y-4">
+                  <div className="p-4 bg-green-50 border border-green-200 rounded-xl">
+                    <div className="flex items-start space-x-3">
+                      <CheckCircle2 className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-xs font-semibold text-green-900 mb-1">Email Sent!</p>
+                        <p className="text-xs text-green-700 leading-relaxed">
+                          If an account exists for <strong>{forgotEmail}</strong>, you will receive a password reset link shortly. Please check your inbox and follow the instructions in the email.
+                        </p>
+                      </div>
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-700 mb-1">New Password *</label>
-                    <div className="relative">
-                      <Lock className="w-3.5 h-3.5 absolute left-3 top-3 text-neutral-400" />
-                      <input
-                        type={showForgotPwd ? 'text' : 'password'}
-                        required
-                        value={forgotNewPassword}
-                        onChange={(e) => setForgotNewPassword(e.target.value)}
-                        placeholder="At least 6 characters"
-                        className="w-full pl-9 pr-10 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs focus:outline-none focus:border-neutral-900 transition-colors"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowForgotPwd(!showForgotPwd)}
-                        className="absolute right-3 top-2.5 text-neutral-400 hover:text-neutral-700 cursor-pointer"
-                      >
-                        {showForgotPwd ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                      </button>
-                    </div>
+                  <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-xl text-[11px] text-neutral-600">
+                    <p className="font-semibold mb-1">What to do next:</p>
+                    <ul className="list-disc list-inside space-y-0.5 text-neutral-600">
+                      <li>Check your email inbox (and spam folder)</li>
+                      <li>Click the password reset link in the email</li>
+                      <li>The link expires in 15 minutes</li>
+                      <li>After reset, return here to sign in</li>
+                    </ul>
                   </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-neutral-700 mb-1">Confirm New Password *</label>
-                    <div className="relative">
-                      <Lock className="w-3.5 h-3.5 absolute left-3 top-3 text-neutral-400" />
-                      <input
-                        type={showForgotPwd ? 'text' : 'password'}
-                        required
-                        value={forgotConfirmPassword}
-                        onChange={(e) => setForgotConfirmPassword(e.target.value)}
-                        placeholder="Re-type your new password"
-                        className="w-full pl-9 pr-10 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs focus:outline-none focus:border-neutral-900 transition-colors"
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="w-full bg-neutral-900 hover:bg-black text-white text-xs font-semibold py-2.5 rounded-xl transition-all shadow-xs disabled:opacity-50 flex items-center justify-center space-x-2 cursor-pointer"
-                  >
-                    {loading ? (
-                      <>
-                        <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                        <span>Updating Password &amp; Signing In...</span>
-                      </>
-                    ) : (
-                      <span>Reset Password &amp; Launch Studio</span>
-                    )}
-                  </button>
 
                   <div className="flex items-center justify-between pt-1 text-xs">
                     <button
                       type="button"
-                      onClick={() => { setForgotStep('REQUEST_OTP'); setError(null); }}
+                      onClick={() => { setForgotStep('REQUEST_RESET'); setForgotEmail(''); setError(null); setSuccessMsg(null); }}
                       className="text-neutral-500 hover:text-neutral-900 cursor-pointer"
                     >
-                      ← Request a different code
+                      ← Send to a different email
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setActiveTab('LOGIN'); setError(null); }}
+                      onClick={() => { setActiveTab('LOGIN'); setError(null); setSuccessMsg(null); }}
                       className="text-neutral-500 hover:text-neutral-900 cursor-pointer font-medium"
                     >
                       Back to Sign In
                     </button>
                   </div>
-                </form>
+                </div>
               )}
             </div>
           )}

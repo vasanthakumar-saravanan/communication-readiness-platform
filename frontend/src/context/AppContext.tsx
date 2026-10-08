@@ -41,7 +41,8 @@ export type AppView =
   | 'PROGRAM_LOGS'
   | 'ASSESSMENT_ACTIVITY'
   | 'ASSESSMENT_SUBMISSIONS'
-  | 'ACTIVATE_INVITE';
+  | 'ACTIVATE_INVITE'
+  | 'PASSWORD_RESET';
 
 export const VIEW_TO_HASH: Record<AppView, string> = {
   DASHBOARD: '#/dashboard',
@@ -330,6 +331,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const params = new URLSearchParams(window.location.search);
     if (params.get('page') === 'activate' || params.has('invite_token')) {
       return 'ACTIVATE_INVITE';
+    }
+    if (params.has('reset_token')) {
+      return 'PASSWORD_RESET';
     }
     const hash = window.location.hash;
     return HASH_TO_VIEW[hash] || 'DASHBOARD';
