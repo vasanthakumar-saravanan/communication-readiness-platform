@@ -333,40 +333,13 @@ export async function triggerLLMEvaluation(
   // Transcript row (student_id is org.students.id)
   db.query(
     `INSERT INTO session.interview_transcripts
-       (session_id, student_id, turn_number, transcript_text, metadata)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT ON CONSTRAINT uq_transcripts_session_turn DO NOTHING`,
-    [
-      sessionId,
-      meta.studentId,
-      meta.turnNumber,
-      transcript,
-      JSON.stringify({
-        question_text: meta.questionText,
-        difficulty: meta.difficulty,
-        category: state.current_category || 'Technical',
-        technical_score: technicalScore,
-        communication_score: commScore,
-        overall_score: turnOverall,
-        fluency_score: fluencyScore,
-        clarity_score: clarityScore,
-        wpm: speech.wpm,
-        pace_label: speech.paceLabel,
-        pace_score: paceScore,
-        filler_count: speech.fillerCount,
-        filler_breakdown: speech.fillerBreakdown,
-        filler_score: fillerScore,
-        pause_count: result.pauseCount,
-        longest_pause_sec: result.longestPauseSec,
-        response_latency_sec: result.responseLatencySec,
-        key_points: keyPoints,
-        points_covered: pointsCovered,
-        points_missed: pointsMissed,
-        feedback: result.feedback,
-        strengths: result.strengths,
-        weaknesses: result.weaknesses,
-      }),
-    ],
+       (session_id, student_id, turn_number, question, answer, difficulty)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (session_id, turn_number) DO UPDATE
+       SET question = EXCLUDED.question,
+           answer = EXCLUDED.answer,
+           difficulty = EXCLUDED.difficulty`,
+    [sessionId, meta.studentId, meta.turnNumber, meta.questionText, transcript, meta.difficulty],
   ).catch((err) => console.error('[interview] transcript insert failed:', err));
 
   const isFinal = options.isFinal || meta.turnNumber >= state.max_turns;
