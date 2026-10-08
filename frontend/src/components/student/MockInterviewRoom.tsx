@@ -53,6 +53,7 @@ export const MockInterviewRoom: React.FC = () => {
     interviewState,
     submitAnswer,
     advanceTurnFromWs,
+    syncLiveInterviewQuestion,
     activeAssignment,
     setActiveView,
     isAssignmentDisqualified,
@@ -145,6 +146,11 @@ export const MockInterviewRoom: React.FC = () => {
   const hasSpokenRef = useRef(false);
   const lastVoiceActiveTimeRef = useRef<number>(0);
   const voiceDurationMsRef = useRef<number>(0);
+  const turnRecordingStartedAtRef = useRef<number>(0);
+  const firstTranscriptAtRef = useRef<number | null>(null);
+  const pauseCountRef = useRef<number>(0);
+  const longestPauseSecRef = useRef<number>(0);
+  const pauseCountedRef = useRef<boolean>(false);
   const isLiveTranscribedRef = useRef<boolean>(false);
   const [isVoiceDetected, setIsVoiceDetected] = useState(false);
   const currentQuestionIdRef = useRef<string>("");
@@ -325,16 +331,58 @@ export const MockInterviewRoom: React.FC = () => {
     }
   };
 
+  const getDeliveryMetrics = () => ({
+    durationSec: voiceDurationMsRef.current > 0
+      ? Math.max(0, Math.round((voiceDurationMsRef.current / 1000) * 10) / 10)
+      : null,
+    pauseCount: pauseCountRef.current,
+    longestPauseSec: longestPauseSecRef.current > 0
+      ? Math.round(longestPauseSecRef.current * 10) / 10
+      : null,
+    responseLatencySec:
+      turnRecordingStartedAtRef.current > 0 && firstTranscriptAtRef.current
+        ? Math.max(
+            0,
+            Math.round(((firstTranscriptAtRef.current - turnRecordingStartedAtRef.current) / 1000) * 10) / 10
+          )
+        : null,
+  });
+
+  const resetTurnDeliveryMetrics = () => {
+    turnRecordingStartedAtRef.current = 0;
+    firstTranscriptAtRef.current = null;
+    pauseCountRef.current = 0;
+    longestPauseSecRef.current = 0;
+    pauseCountedRef.current = false;
+    voiceDurationMsRef.current = 0;
+    lastVoiceActiveTimeRef.current = 0;
+  };
+
   const handleExecuteSubmit = async (textToSubmit?: string) => {
     if (isSubmittingRef.current) return;
     isSubmittingRef.current = true;
     setIsSubmitting(true);
 
+    const wsConnected = interviewWsClient.isConnected();
+    const serverStt = interviewWsClient.usesServerStt();
+    const delivery = getDeliveryMetrics();
+
     stopRecordingTurn();
+
+    // IMPORTANT: with server STT, the browser does NOT need to have received
+    // a final transcript yet. Ending audio is the authoritative submission signal.
+    if (wsConnected && serverStt) {
+      setCurrentSpeechText('');
+      latestSpeechRef.current = '';
+      accumulatedSpeechRef.current = '';
+      currentSessionFinalRef.current = '';
+      interviewWsClient.audioEnd(undefined, delivery);
+      return;
+    }
 
     let candidateAnswer = (textToSubmit || wsConfirmedTranscript || latestSpeechRef.current || currentSpeechText).trim();
 
-    // If Whisper is configured, refine transcript from raw audio buffer
+    // Browser/Whisper transcript is fallback-only when server STT is unavailable.
     if (hasWhisperKey && audioRecorderRef.current.isRecording()) {
       setIsTranscribingWithWhisper(true);
       try {
@@ -356,7 +404,6 @@ export const MockInterviewRoom: React.FC = () => {
       audioRecorderRef.current.stop().catch(() => {});
     }
 
-    // Validate we have a real transcript before submitting
     if (!candidateAnswer) {
       isSubmittingRef.current = false;
       setIsSubmitting(false);
@@ -367,18 +414,15 @@ export const MockInterviewRoom: React.FC = () => {
 
     const finalAnswer = candidateAnswer;
 
-    // WS path: send transcript to backend
-    if (interviewWsClient.isConnected()) {
+    if (wsConnected) {
       setCurrentSpeechText('');
       latestSpeechRef.current = '';
       accumulatedSpeechRef.current = '';
       currentSessionFinalRef.current = '';
-      interviewWsClient.submitTranscript(finalAnswer);
-      // isSubmittingRef stays true until turn_result event arrives via WS
+      interviewWsClient.audioEnd(finalAnswer, delivery);
       return;
     }
 
-    // REST fallback path (no WS)
     try {
       await submitAnswer(finalAnswer);
     } catch (err) {
@@ -392,8 +436,7 @@ export const MockInterviewRoom: React.FC = () => {
       currentSessionFinalRef.current = "";
       hasSpokenRef.current = false;
       isLiveTranscribedRef.current = false;
-      voiceDurationMsRef.current = 0;
-      lastVoiceActiveTimeRef.current = 0;
+      resetTurnDeliveryMetrics();
     }
   };
 
@@ -456,6 +499,7 @@ export const MockInterviewRoom: React.FC = () => {
               hasSpokenRef.current = true;
               lastVoiceActiveTimeRef.current = now;
               voiceDurationMsRef.current += 16;
+              pauseCountedRef.current = false;
 
               // Clear silence timer if user speaks again
               if (avg > 20 && silenceTimerRef.current) {
@@ -472,6 +516,19 @@ export const MockInterviewRoom: React.FC = () => {
                 autoModeRef.current
               ) {
                 const silenceDuration = now - lastVoiceActiveTimeRef.current;
+
+                if (
+                  silenceDuration >= 2500 &&
+                  !pauseCountedRef.current &&
+                  voiceDurationMsRef.current > 0
+                ) {
+                  pauseCountRef.current += 1;
+                  longestPauseSecRef.current = Math.max(
+                    longestPauseSecRef.current,
+                    silenceDuration / 1000
+                  );
+                  pauseCountedRef.current = true;
+                }
 
                 // When silence reaches 1200ms after speaking, allow 3.5s quiet window before auto-submission
                 if (silenceDuration >= 1200 && !silenceTimerRef.current) {
@@ -633,6 +690,12 @@ export const MockInterviewRoom: React.FC = () => {
 
     await initMicrophoneStream();
 
+    turnRecordingStartedAtRef.current = Date.now();
+    firstTranscriptAtRef.current = null;
+    pauseCountRef.current = 0;
+    longestPauseSecRef.current = 0;
+    pauseCountedRef.current = false;
+
     if (interviewWsClient.isConnected() && mediaStreamRef.current) {
       // WS path: stream audio to Deepgram backend (primary path)
       // Turn 1 always starts at EASY regardless of assigned difficulty
@@ -674,8 +737,28 @@ export const MockInterviewRoom: React.FC = () => {
   // ── WS event handlers ────────────────────────────────────────────────────
   useEffect(() => {
     interviewWsClient.setHandlers({
+      onReady: (data) => {
+        setWsTurnNumber(data.turnNumber);
+        setWsCurrentQuestion(data.questionText || null);
+        wsTurnNumberRef.current = data.turnNumber;
+        wsTurnDifficultyRef.current = (data.difficulty || 'EASY') as 'EASY' | 'MEDIUM' | 'ADVANCED';
+        wsCurrentQuestionRef.current = data.questionText || null;
+        if (data.questionText) {
+          syncLiveInterviewQuestion({
+            turnNumber: data.turnNumber,
+            questionText: data.questionText,
+            difficulty: data.difficulty,
+          });
+        }
+      },
       onTranscriptInterim: (text) => {
         latestSpeechRef.current = text;
+        if (!firstTranscriptAtRef.current && text.trim()) {
+          firstTranscriptAtRef.current = Date.now();
+        }
+        if (!firstTranscriptAtRef.current && text.trim()) {
+          firstTranscriptAtRef.current = Date.now();
+        }
         setCurrentSpeechText(text);
         hasSpokenRef.current = true;
         isLiveTranscribedRef.current = true;
@@ -712,8 +795,7 @@ export const MockInterviewRoom: React.FC = () => {
         accumulatedSpeechRef.current = '';
         hasSpokenRef.current = false;
         isLiveTranscribedRef.current = false;
-        voiceDurationMsRef.current = 0;
-        lastVoiceActiveTimeRef.current = 0;
+        resetTurnDeliveryMetrics();
         setWsConversationalResponse('');
         setWsConfirmedTranscript(null);
         setWsInvalidTranscriptMsg(null);
@@ -917,7 +999,11 @@ export const MockInterviewRoom: React.FC = () => {
       const token = localStorage.getItem('auth_token');
       const sid = interviewState.sessionId;
       if (token && sid) {
-        interviewWsClient.connect(sid, token);
+        try {
+          await interviewWsClient.connect(sid, token);
+        } catch (err) {
+          console.warn('[MockInterview] Live WebSocket unavailable; using client fallback:', err);
+        }
       }
 
       setHasSessionStarted(true);
