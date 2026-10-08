@@ -15,7 +15,6 @@ import { eventBus } from '../shared/events/eventBus';
 import { Events, AttemptCompletedPayload } from '../shared/events/events';
 import { sessionContextService, InterviewState, InterviewResume } from './sessionContextService';
 import type { InterviewReport } from './interviewReport';
-import { getCoins, spendCoin, refundCoin } from './coinService';
 
 export const FIRST_QUESTION =
   "Tell me about yourself. Walk me through your background, the key skills you've built, and what you've been working on most recently.";
@@ -110,130 +109,6 @@ export async function createAttemptAndSession(
   } finally {
     client.release();
   }
-}
-
-// ── Start a live (voice) interview for the logged-in student ─────────────────
-
-// Resume details sent by the client (parsed in the browser) or stored in org.resumes.
-export interface ResumeInput {
-  skills?: string[];
-  projects?: { title: string; techStack?: string[]; description?: string }[];
-}
-
-const cleanList = (values: unknown[] | undefined, max: number) =>
-  (values ?? []).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
-    .map((v) => v.trim().slice(0, 80)).slice(0, max);
-
-async function loadResume(studentId: string, name: string, provided?: ResumeInput): Promise<InterviewResume> {
-  let source = provided;
-  if (!source?.skills?.length && !source?.projects?.length) {
-    // Fall back to the parsed data of the student's current uploaded resume, if any
-    const { rows } = await db.query<{ parsed_data: ResumeInput | null }>(
-      'SELECT parsed_data FROM org.resumes WHERE student_id = $1 AND is_current = true',
-      [studentId]
-    );
-    source = rows[0]?.parsed_data ?? undefined;
-  }
-  return {
-    name,
-    skills: cleanList(source?.skills, 20),
-    projects: (source?.projects ?? []).slice(0, 5).map((p) => ({
-      title: String(p.title ?? '').slice(0, 120),
-      tech_stack: cleanList(p.techStack, 10),
-      description: String(p.description ?? '').slice(0, 400),
-    })).filter((p) => p.title),
-  };
-}
-
-export async function startLiveInterview(userId: string, resumeInput?: ResumeInput): Promise<{
-  sessionId: string;
-  attemptId: string;
-  maxTurns: number;
-  coinsRemaining: number;
-  firstQuestion: { id: string; questionNumber: number; questionText: string; difficulty: 'EASY'; category: string };
-}> {
-  const { rows } = await db.query<StudentContext & { name: string }>(
-    `SELECT s.id, s.program_id, s.batch_id, s.subdivision_id, u.name
-     FROM org.students s
-     JOIN identity.users u ON u.id = s.user_id
-     WHERE s.user_id = $1`,
-    [userId]
-  );
-  if (rows.length === 0) throw new AppError(404, 'Student profile not found', 'NOT_FOUND');
-  const student = rows[0];
-
-  // Fail fast before creating anything when the wallet is empty
-  if ((await getCoins(student.id)).coins < 1) {
-    throw new AppError(402, 'You have no coins left. Coins are restored by your administrator.', 'INSUFFICIENT_COINS');
-  }
-  const { attemptId, sessionId } = await createAttemptAndSession(student);
-  let coinsRemaining: number;
-  try {
-    coinsRemaining = await spendCoin(student.id, attemptId);
-  } catch (err) {
-    await terminateLiveInterview(sessionId, attemptId).catch(() => {});
-    throw err;
-  }
-  const maxTurns = env.MAX_QUESTIONS_PER_SESSION;
-  const resume = await loadResume(student.id, student.name, resumeInput)
-    .catch(() => ({ name: student.name, skills: [], projects: [] }) as InterviewResume);
-
-  const initialState: InterviewState = {
-    session_id: sessionId,
-    student_id: student.id,
-    topic_curriculum: ['General Programming'],
-    completed_topics: [],
-    active_topic: 'General Programming',
-    active_topic_question_count: 0,
-    max_questions_per_topic: 3,
-    do_not_ask_or_repeat: [FIRST_QUESTION],
-    current_turn: 1,
-    max_turns: maxTurns,
-    current_difficulty: 'EASY',
-    candidate_performance_trend: 'stable',
-    consecutive_weak_answers: 0,
-    current_question: FIRST_QUESTION,
-    current_question_turn: 1,
-    current_rubric: {},
-    status: 'ACTIVE',
-    attempt_id: attemptId,
-    resume,
-    current_category: 'Introduction',
-    current_key_points: FIRST_QUESTION_KEY_POINTS,
-    turn_results: [],
-    clarifications_this_turn: 0,
-    consecutive_ai_failures: 0,
-    tab_switches: 0,
-    fullscreen_exits: 0,
-  };
-
-  try {
-    await db.query(
-      `INSERT INTO session.interview_sessions (id, student_id, status, interview_state)
-       VALUES ($1, $2, 'active', $3)`,
-      [sessionId, student.id, JSON.stringify(initialState)]
-    );
-    await sessionContextService.setState(sessionId, initialState);
-  } catch (err) {
-    // The interview never started — give the coin back
-    await terminateLiveInterview(sessionId, attemptId).catch(() => {});
-    await refundCoin(student.id, attemptId).catch(() => {});
-    throw err;
-  }
-
-  return {
-    sessionId,
-    attemptId,
-    maxTurns,
-    coinsRemaining,
-    firstQuestion: {
-      id: `${sessionId}:1`,
-      questionNumber: 1,
-      questionText: FIRST_QUESTION,
-      difficulty: 'EASY',
-      category: 'Introduction',
-    },
-  };
 }
 
 // ── Ownership lookup used by the WebSocket gateway ───────────────────────────
