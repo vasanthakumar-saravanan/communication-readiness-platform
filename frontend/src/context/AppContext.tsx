@@ -163,6 +163,7 @@ interface AppContextType {
   submitAnswer: (answerText: string) => Promise<void>;
   endInterview: () => Promise<void>;
   advanceTurnFromWs: (result: WsTurnResult) => void;
+  syncLiveInterviewQuestion: (data: { turnNumber: number; questionText: string; difficulty: string }) => void;
   completeAssessmentAwaitingEvaluation: (type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION', finalReport?: DiagnosticReport | null) => Promise<void>;
   isEvaluationPending: boolean;
   newReportNotification: { reportId: string; score: number; title: string; timestamp: number } | null;
@@ -1527,6 +1528,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const endInterview = async () => {
     await completeAssessmentAwaitingEvaluation(interviewState.type);
+  };
+
+  const syncLiveInterviewQuestion = (data: { turnNumber: number; questionText: string; difficulty: string }) => {
+    if (!data.questionText.trim()) return;
+    setInterviewState(prev => {
+      const index = Math.max(0, data.turnNumber - 1);
+      const questions = [...prev.questions];
+      while (questions.length < index) {
+        questions.push({
+          id: `q-ws-placeholder-${questions.length + 1}`,
+          questionNumber: questions.length + 1,
+          questionText: '',
+          difficulty: 'EASY',
+        });
+      }
+
+      const existing = questions[index];
+      questions[index] = {
+        ...(existing || {
+          id: `q-ws-${data.turnNumber}`,
+          questionNumber: data.turnNumber,
+          questionText: '',
+          difficulty: 'EASY',
+        }),
+        questionNumber: data.turnNumber,
+        questionText: data.questionText,
+        difficulty: (data.difficulty === 'MEDIUM' || data.difficulty === 'ADVANCED' ? data.difficulty : 'EASY') as Difficulty,
+      };
+
+      return {
+        ...prev,
+        turnIndex: index,
+        currentDifficulty: questions[index].difficulty,
+        questions,
+        orbState: 'SPEAKING' as const,
+        liveTranscript: '',
+        isCompletedAwaitingEvaluation: false,
+      };
+    });
   };
 
   const advanceTurnFromWs = (result: WsTurnResult) => {
