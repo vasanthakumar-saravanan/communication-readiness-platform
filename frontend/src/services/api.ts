@@ -2076,6 +2076,12 @@ class ApiClient {
       }
     },
 
+    // Server-authoritative session coin balance. Unlike raw credits, this returns
+    // the exact number of interview/listening coins currently available.
+    getCoins: async (): Promise<{ coins: number; maxCoins: number }> => {
+      return this.fetchAPI<{ coins: number; maxCoins: number }>('/coins/me');
+    },
+
     updateProfile: async (studentId: string, updates: Partial<StudentProfile>): Promise<StudentProfile> => {
       try {
         // Update via backend API
