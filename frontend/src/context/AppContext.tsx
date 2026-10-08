@@ -879,29 +879,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     restoreStudentCoinsToFive(studentId);
   };
 
-  // Sync student.coins from DB credit balance whenever a student logs in.
-  // DB (credit.credit_accounts) is the source of truth; localStorage is only a cache.
+  // Sync the exact server-authoritative coin balance on login and after a
+  // completed interview. localStorage remains only a UI cache/fallback.
   useEffect(() => {
     if (!currentUser || currentUser.role !== 'STUDENT') return;
     let cancelled = false;
-    api.student.getCreditBalance()
-      .then(({ balance, hasAccount }) => {
+    api.student.getCoins()
+      .then(({ coins }) => {
         if (cancelled) return;
-        if (!hasAccount) return; // no account yet — keep localStorage/default value
         setStudent(prev => {
-          // Map DB balance to the coins gate: any positive balance = 5 usable coins
-          const newCoins = balance > 0 ? Math.min(5, balance) : 0;
           const sKey = prev.id;
           try {
-            localStorage.setItem(`crp_student_coins_${sKey}`, String(newCoins));
-            if (newCoins > 0) localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
+            localStorage.setItem(`crp_student_coins_${sKey}`, String(coins));
+            if (coins > 0) localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
           } catch {}
-          return { ...prev, coins: newCoins };
+          return { ...prev, coins };
         });
       })
-      .catch(() => {}); // silently degrade — localStorage value remains
+      .catch(() => {}); // Keep cached value if the server is temporarily unavailable.
     return () => { cancelled = true; };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, interviewState.sessionId, interviewState.isCompletedAwaitingEvaluation]);
 
   // 3-Day wait period cooldown check for individually registered students
   useEffect(() => {

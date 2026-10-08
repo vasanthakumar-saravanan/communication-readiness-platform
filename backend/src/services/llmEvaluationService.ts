@@ -24,6 +24,7 @@ import {
   computeSpeechMetrics, communicationScore, overallScore, scorePauses, blendFluency, blendTechnical,
 } from './speechMetrics';
 import { wsManager } from './wsManager';
+import { rewardCompletion } from './coinService';
 import type { AudioStartMeta } from './deepgramService';
 
 type Difficulty = 'EASY' | 'MEDIUM' | 'ADVANCED';
@@ -186,6 +187,14 @@ async function complete(sessionId: string, state: InterviewState): Promise<Inter
       await concludeLiveInterview(sessionId, state.attempt_id, report);
     } catch (err) {
       console.error('[interview] storing the server-built report failed:', err);
+    }
+
+    // Reward only sessions that were actually charged. rewardCompletion is idempotent,
+    // so reconnects or duplicate completion events cannot award coins twice.
+    try {
+      report.coins = await rewardCompletion(state.student_id, state.attempt_id);
+    } catch (err) {
+      console.error('[interview] completion coin reward failed:', err);
     }
   }
   return report;
