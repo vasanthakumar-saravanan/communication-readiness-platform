@@ -950,8 +950,7 @@ export const MockInterviewRoom: React.FC = () => {
     accumulatedSpeechRef.current = "";
     hasSpokenRef.current = false;
     isLiveTranscribedRef.current = false;
-    voiceDurationMsRef.current = 0;
-    lastVoiceActiveTimeRef.current = 0;
+    resetTurnDeliveryMetrics();
     setSilenceCountdown(null);
     setShowQuestionText(true);
 
@@ -1033,7 +1032,7 @@ export const MockInterviewRoom: React.FC = () => {
   const hasFloatingText = hasSessionStarted && !!(
     (showQuestionText && currentQ?.questionText && !isListeningDomain) ||
     wsConfirmedTranscript ||
-    (currentSpeechText && isRecording) ||
+    currentSpeechText ||
     wsInvalidTranscriptMsg
   );
 
