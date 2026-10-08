@@ -11,6 +11,7 @@ import { eventBus } from '../shared/events/eventBus';
 import { Events, UserRegisteredPayload } from '../shared/events/events';
 import { UserRole } from '../shared/types/roles';
 import { AuthUser } from '../shared/types/auth';
+import { clearFailures, lockedForSeconds, recordFailure } from '../shared/security/loginThrottle';
 
 export const authRouter = Router();
 
@@ -114,6 +115,14 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
     return;
   }
   const { email, password } = parsed.data;
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+
+  const lockedSeconds = lockedForSeconds(clientIp, email);
+  if (lockedSeconds > 0) {
+    res.setHeader('Retry-After', String(lockedSeconds));
+    sendError(res, new AppError(429, `Too many failed login attempts. Try again in ${lockedSeconds} seconds.`, 'LOGIN_THROTTLED'));
+    return;
+  }
 
   try {
     const { rows } = await db.query<{
@@ -131,6 +140,7 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
     const hashToCheck = rows.length > 0 ? rows[0].password_hash : DUMMY_HASH;
     const passwordMatch = await bcrypt.compare(password, hashToCheck);
     if (rows.length === 0 || !passwordMatch) {
+      recordFailure(clientIp, email);
       throw new AppError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
     }
 
@@ -152,6 +162,7 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
       name: user.name, tokenVersion: user.token_version,
     };
     const token = signToken(authUser);
+    clearFailures(clientIp, email);
 
     sendSuccess(res, {
       token,
