@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Question Generation ────────────────────────────────────────────────────────
@@ -26,14 +26,15 @@ class QuestionGenerationRequest(BaseModel):
     projects: list[ProjectSummary] = Field(default_factory=list)
     previous_turns: list[PreviousTurn] = Field(default_factory=list)
     difficulty: str = "EASY"
-    domain: str | None = None
-    resume_context: str | None = None  # pre-built resume summary for personalization
-
+    domain: str | None = None  # PEP domain, if applicable
+    resume_context: str | None = None  # backwards-compatible extra context
 
 class GeneratedQuestionResponse(BaseModel):
     question_text: str
     difficulty: str
     category: str | None = None
+    # 3-5 short points a strong answer should cover — the rubric the answer is scored against
+    key_points: list[str] = Field(default_factory=list)
 
 
 # ── Turn Evaluation ────────────────────────────────────────────────────────────
@@ -44,6 +45,8 @@ class TurnEvaluationRequest(BaseModel):
     difficulty: str
     turn_number: int = 1
     domain: str | None = None
+    # Rubric from question generation; when present the answer is checked point by point
+    expected_points: list[str] = Field(default_factory=list)
 
 
 class TurnEvaluationResponse(BaseModel):
@@ -54,7 +57,28 @@ class TurnEvaluationResponse(BaseModel):
     feedback: str
     strengths: str
     weaknesses: str
-    next_recommended_difficulty: str  # EASY | MEDIUM | ADVANCED
+    next_recommended_difficulty: str
+    fluency_score: float | None = Field(default=None, ge=0, le=10)
+    clarity_score: float | None = Field(default=None, ge=0, le=10)
+    is_clarification: bool = False
+    clarification_response: str = ""
+    points_covered: list[str] = Field(default_factory=list)
+    points_missed: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _clamp_scores(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for key in ("technical_score", "communication_score", "fluency_score", "clarity_score"):
+                value = data.get(key)
+                if isinstance(value, (int, float)):
+                    data[key] = min(10.0, max(0.0, float(value)))
+            for key in ("wpm", "filler_words"):
+                value = data.get(key)
+                if isinstance(value, (int, float)):
+                    data[key] = max(0, int(value))
+        return data
+
 
 
 # ── Listening Evaluation ───────────────────────────────────────────────────────
