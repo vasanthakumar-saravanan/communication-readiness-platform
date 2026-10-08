@@ -145,9 +145,11 @@ export function sendAudio(sessionId: string, audio: Buffer): void {
   }
 }
 
-export function closeSession(sessionId: string): void {
+export function closeSession(sessionId: string): string {
   const session = sessions.get(sessionId);
-  if (!session) return;
+  if (!session) return '';
+  const transcript = session.transcript.trim();
   try { session.socket.sendCloseStream({}); } catch {}
   sessions.delete(sessionId);
+  return transcript;
 }
