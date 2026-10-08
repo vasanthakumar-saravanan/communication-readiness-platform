@@ -113,20 +113,21 @@ adminRouter.patch(
 const createStaffSchema = z.object({
   name: z.string().min(2).max(255),
   email: z.string().email().transform(s => s.toLowerCase()),
-  role: z.enum(['FACULTY_MENTOR', 'TRAINER', 'PLACEMENT_COORDINATOR', 'PROGRAM_ADMIN']),
+  role: z.enum(['FACULTY_MENTOR', 'TRAINER', 'PLACEMENT_COORDINATOR', 'PROGRAM_ADMIN', 'STUDENT']),
 });
 
 adminRouter.post(
   '/users',
   requireRole('PROGRAM_ADMIN', 'SUPER_ADMIN'),
   async (req: AuthRequest, res: Response): Promise<void> => {
+    const client = await db.connect();
     try {
       const parsed = createStaffSchema.safeParse(req.body);
       if (!parsed.success) throw new AppError(422, 'Validation failed', 'VALIDATION_ERROR');
 
       const { name, email, role } = parsed.data;
 
-      const { rows: existing } = await db.query(
+      const { rows: existing } = await client.query(
         'SELECT id FROM identity.users WHERE email = $1',
         [email]
       );
@@ -136,14 +137,24 @@ adminRouter.post(
       const password = crypto.randomBytes(16).toString('hex').slice(0, 12);
       const passwordHash = await bcrypt.hash(password, 10);
 
-      const { rows } = await db.query(
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
         `INSERT INTO identity.users (name, email, password_hash, role)
          VALUES ($1, $2, $3, $4)
          RETURNING id, name, email, role, created_at`,
         [name, email, passwordHash, role]
       );
-
       const user = rows[0];
+
+      if (role === 'STUDENT') {
+        await client.query(
+          `INSERT INTO org.students (user_id) VALUES ($1)`,
+          [user.id]
+        );
+      }
+
+      await client.query('COMMIT');
 
       // Send welcome email non-blocking — failure must not break the 201 response
       const createdByName = (req as AuthRequest).user?.name ?? 'Platform Admin';
@@ -158,6 +169,38 @@ adminRouter.post(
       });
 
       sendSuccess(res, { user }, 201);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      sendError(res, err);
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ── GET /api/admin/drills — list all drill assignments (PROGRAM_ADMIN) ─────────
+
+adminRouter.get(
+  '/drills',
+  requireRole('PROGRAM_ADMIN', 'SUPER_ADMIN'),
+  async (_req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { rows } = await db.query(
+        `SELECT da.id, da.title, da.session_type, da.target_scope,
+                da.program_id, p.name AS program_name,
+                da.subdivision_id, sub.name AS subdivision_name,
+                da.domain_or_topic, da.difficulty, da.due_date,
+                da.is_mandatory, da.is_active, da.created_at,
+                u.id AS created_by_id, u.name AS created_by_name, u.role AS created_by_role
+         FROM org.drill_assignments da
+         LEFT JOIN org.programs p ON p.id = da.program_id
+         LEFT JOIN org.subdivisions sub ON sub.id = da.subdivision_id
+         LEFT JOIN identity.users u ON u.id = da.created_by
+         WHERE da.is_active = true
+         ORDER BY da.created_at DESC
+         LIMIT 200`
+      );
+      sendSuccess(res, { drills: rows });
     } catch (err) {
       sendError(res, err);
     }

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head><title>Test Login Flow</title></head>
+<body>
+<h1>Test Student Login Flow</h1>
+<button onclick="testLogin()">Test Student Login</button>
+<pre id="output"></pre>
+
+<script>
+async function testLogin() {
+  const output = document.getElementById('output');
+  output.textContent = '';
+  
+  function log(msg) {
+    output.textContent += msg + '\n';
+  }
+  
+  try {
+    // Step 1: Login
+    log('Step 1: POST /api/auth/login...');
+    const loginRes = await fetch('http://localhost:5000/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        email: 'student.real01@example.com',
+        password: 'student123'
+      })
+    });
+    
+    const loginData = await loginRes.json();
+    log(`Login response: ${loginRes.status}`);
+    log(`Token: ${loginData.data.token.substring(0, 20)}...`);
+    log(`User: ${loginData.data.user.name} (${loginData.data.user.role})`);
+    log(`Student ID: ${loginData.data.studentId}`);
+    
+    const token = loginData.data.token;
+    
+    // Step 2: Store in localStorage
+    log('\nStep 2: Store in localStorage...');
+    localStorage.setItem('auth_token', token);
+    localStorage.setItem('auth_user', JSON.stringify(loginData.data.user));
+    log('✓ Stored');
+    
+    // Step 3: Call /api/auth/me
+    log('\nStep 3: GET /api/auth/me...');
+    const meRes = await fetch('http://localhost:5000/api/auth/me', {
+      headers: {'Authorization': `Bearer ${token}`}
+    });
+    
+    const meData = await meRes.json();
+    log(`/me response: ${meRes.status}`);
+    log(`User: ${meData.data.user.name} (${meData.data.user.role})`);
+    log(`Student ID: ${meData.data.studentId}`);
+    
+    log('\n✅ ALL CHECKS PASSED');
+    log('Login flow works correctly!');
+    
+  } catch (error) {
+    log(`\n❌ ERROR: ${error.message}`);
+  }
+}
+</script>
+</body>
+</html>

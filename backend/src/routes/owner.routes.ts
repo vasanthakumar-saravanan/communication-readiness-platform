@@ -6,6 +6,8 @@ import { requireRole } from '../middleware/authorize';
 import { z } from 'zod';
 import { AppError } from '../shared/errors/AppError';
 import crypto from 'crypto';
+import { sendSuperAdminInviteEmail } from '../services/emailService';
+import { CreditService } from '../modules/credits/credits.service';
 
 export const ownerRouter = Router();
 
@@ -467,6 +469,120 @@ ownerRouter.get(
   }
 );
 
+// ── GET /api/owner/institutions/:id/students ──────────────────────────────────
+// Get students enrolled in a specific institution (read-only for Platform Owner)
+ownerRouter.get(
+  '/institutions/:id/students',
+  requirePlatformOwner,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { id: institutionId } = req.params;
+      const limit = Math.min(parseInt((req.query.limit as string) ?? '100'), 500);
+
+      const { rows } = await db.query(
+        `SELECT s.id, u.id AS user_id, u.name, u.email, s.roll_number,
+                u.status AS account_status, p.name AS program_name, b.year AS batch_year,
+                (s.parsed_resume IS NOT NULL) AS has_resume, s.created_at,
+                ca.balance AS db_credit_balance
+         FROM org.students s
+         JOIN identity.users u ON u.id = s.user_id
+         JOIN org.batches b ON b.id = s.batch_id
+         JOIN org.programs p ON p.id = b.program_id
+         LEFT JOIN credit.credit_accounts ca ON ca.student_id = s.id
+         WHERE p.institution_id = $1
+         ORDER BY u.name
+         LIMIT $2`,
+        [institutionId, limit]
+      );
+      sendSuccess(res, { students: rows, total: rows.length });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// ── GET /api/owner/students/:studentId/balance ────────────────────────────────
+// Read a student's DB credit balance (org.students.id as studentId)
+ownerRouter.get(
+  '/students/:studentId/balance',
+  requirePlatformOwner,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const studentId = String(req.params.studentId);
+      const { rows } = await db.query(
+        `SELECT ca.balance, ca.updated_at
+         FROM credit.credit_accounts ca
+         WHERE ca.student_id = $1`,
+        [studentId]
+      );
+      const balance = rows.length > 0 ? Number(rows[0].balance) : null;
+      sendSuccess(res, { studentId, balance, hasAccount: rows.length > 0 });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// ── POST /api/owner/students/:studentId/grant-coins ───────────────────────────
+// Grant DB credits to a student (creates account if missing); returns transaction ID.
+// studentId = org.students.id (UUID)
+const grantCoinsSchema = z.object({
+  amount: z.number().int().min(1).max(10000),
+  reason: z.string().optional().default('Platform Owner grant')
+});
+
+ownerRouter.post(
+  '/students/:studentId/grant-coins',
+  requirePlatformOwner,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const studentId = String(req.params.studentId);
+      const parsed = grantCoinsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(422).json({ status: 'error', message: 'Invalid grant data', errors: parsed.error.flatten() });
+        return;
+      }
+      const { amount, reason } = parsed.data;
+
+      // Verify student exists
+      const { rows: studentRows } = await db.query(
+        `SELECT s.id, u.id AS user_id, u.name, u.email
+         FROM org.students s
+         JOIN identity.users u ON u.id = s.user_id
+         WHERE s.id = $1`,
+        [studentId]
+      );
+      if (studentRows.length === 0) {
+        res.status(404).json({ status: 'error', message: 'Student not found' });
+        return;
+      }
+      const student = studentRows[0];
+
+      // Ensure credit account exists (idempotent)
+      await CreditService.createAccount(studentId);
+
+      // Grant credits — use a UUID as referenceId (credit_transactions.reference_id is UUID type)
+      const referenceId = crypto.randomUUID();
+      const { newBalance, transactionId } = await CreditService.earn(
+        studentId, amount, reason, referenceId
+      );
+
+      sendSuccess(res, {
+        studentId,
+        userId: student.user_id,
+        studentName: student.name,
+        studentEmail: student.email,
+        amountGranted: amount,
+        newBalance,
+        transactionId,
+        grantedBy: req.user!.id
+      });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // INVITE FLOW ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -475,7 +591,7 @@ ownerRouter.get(
 // Invite Super Admin for an institution
 const inviteSchema = z.object({
   firstName: z.string().min(1),
-  lastName: z.string().min(1),
+  lastName: z.string().optional().default(''),
   email: z.string().email()
 });
 
@@ -581,9 +697,14 @@ ownerRouter.post(
 
       const invite = inviteResult.rows[0];
 
-      // TODO: Send email via emailService
-      // For now, just return the invite URL
       const inviteUrl = `${req.protocol}://${req.get('host')}/auth/accept-invite?token=${token}`;
+
+      const emailSent = await sendSuperAdminInviteEmail({
+        to: normalizedEmail,
+        name: fullName,
+        institutionName: institution.name,
+        inviteUrl
+      });
 
       sendSuccess(res, {
         invite: {
@@ -598,7 +719,8 @@ ownerRouter.post(
           expiresAt: invite.expires_at,
           createdAt: invite.created_at
         },
-        inviteUrl
+        inviteUrl,
+        emailSent
       });
     } catch (err) {
       sendError(res, err);

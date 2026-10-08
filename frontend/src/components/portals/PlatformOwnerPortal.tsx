@@ -26,7 +26,10 @@ import {
   Bot,
   ArrowRight,
   Download,
-  LayoutDashboard
+  LayoutDashboard,
+  Gift,
+  Loader2,
+  Coins
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { logger } from '../../services/logger';
@@ -54,6 +57,13 @@ export const PlatformOwnerPortal: React.FC = () => {
   const [profileCollege, setProfileCollege] = useState<College | null>(null);
   const [collegeProfileData, setCollegeProfileData] = useState<any | null>(null);
   const [loadingProfile, setLoadingProfile] = useState(false);
+  const [institutionStudents, setInstitutionStudents] = useState<any[]>([]);
+  const [loadingStudents, setLoadingStudents] = useState(false);
+  const [showStudentPanel, setShowStudentPanel] = useState(false);
+  const [grantingStudentId, setGrantingStudentId] = useState<string | null>(null);
+  const [grantAmount, setGrantAmount] = useState(100);
+  const [grantLoading, setGrantLoading] = useState(false);
+  const [grantResults, setGrantResults] = useState<Record<string, { transactionId: string; newBalance: number; coinsSet: number }>>({});
 
   // Delete College Modal state (with password verification)
   const [deleteCollegeModalOpen, setDeleteCollegeModalOpen] = useState(false);
@@ -113,6 +123,10 @@ export const PlatformOwnerPortal: React.FC = () => {
   useEffect(() => {
     if (!profileCollege) {
       setCollegeProfileData(null);
+      setInstitutionStudents([]);
+      setShowStudentPanel(false);
+      setGrantingStudentId(null);
+      setGrantResults({});
       return;
     }
 
@@ -121,9 +135,7 @@ export const PlatformOwnerPortal: React.FC = () => {
       setLoadingProfile(true);
       try {
         const data = await api.owner.getCollegeProfileMetrics(profileCollege.id);
-        if (isMounted) {
-          setCollegeProfileData(data);
-        }
+        if (isMounted) setCollegeProfileData(data);
       } catch (err) {
         console.warn('Failed to load college profile metrics:', err);
       } finally {
@@ -131,9 +143,41 @@ export const PlatformOwnerPortal: React.FC = () => {
       }
     };
 
+    const fetchStudents = async () => {
+      setLoadingStudents(true);
+      try {
+        const students = await api.owner.getInstitutionStudents(profileCollege.id);
+        if (isMounted) setInstitutionStudents(students);
+      } catch (err) {
+        console.warn('Failed to load institution students:', err);
+      } finally {
+        if (isMounted) setLoadingStudents(false);
+      }
+    };
+
     fetchProfile();
+    fetchStudents();
     return () => { isMounted = false; };
   }, [profileCollege?.id]);
+
+  const handleGrantCoins = async (studentId: string, amount: number) => {
+    setGrantLoading(true);
+    try {
+      const result = await api.owner.grantStudentCoins(studentId, amount);
+      // DB is now source of truth — student's AppContext will sync coins from DB on next render.
+      // We show the resulting DB balance in the UI; no localStorage write needed here.
+      setGrantResults(prev => ({
+        ...prev,
+        [studentId]: { transactionId: result.transactionId, newBalance: result.newBalance, coinsSet: result.newBalance > 0 ? 5 : 0 }
+      }));
+      setGrantingStudentId(null);
+    } catch (err: any) {
+      console.error('Grant failed:', err);
+      alert(`Grant failed: ${err?.message ?? 'Unknown error'}`);
+    } finally {
+      setGrantLoading(false);
+    }
+  };
 
   const handleCreateCollege = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -174,10 +218,20 @@ export const PlatformOwnerPortal: React.FC = () => {
       logger.info('INVITE', `Super admin invited: ${res.invite.email} (${res.invite.collegeName})`);
       setLatestInviteUrl(res.inviteUrl);
       setLatestInviteDetails(res.invite);
-      setFeedback({ 
-        type: 'success', 
-        message: `Activation link generated for ${res.invite.name} (${res.invite.email})!` 
-      });
+
+      // Check if email was actually sent
+      if (!res.emailSent) {
+        setFeedback({
+          type: 'error',
+          message: `⚠️ Invite created but EMAIL NOT SENT. Check SMTP configuration in backend/.env. Share the link manually: ${res.inviteUrl}`
+        });
+      } else {
+        setFeedback({
+          type: 'success',
+          message: `✓ Invitation email sent to ${res.invite.name} (${res.invite.email})!`
+        });
+      }
+
       setAdminFirstName('');
       setAdminLastName('');
       setAdminEmail('');
@@ -589,23 +643,31 @@ export const PlatformOwnerPortal: React.FC = () => {
                   </div>
                   <div className="flex items-baseline space-x-2">
                     <span className="text-3xl font-black text-neutral-900">
-                      {collegeProfileData?.enrolledStudentsCount || 240}
+                      {loadingStudents ? '…' : institutionStudents.length > 0 ? institutionStudents.length : (collegeProfileData?.enrolledStudentsCount ?? 0)}
                     </span>
                     <span className="text-neutral-500 text-xs">registered students</span>
                   </div>
                   <div className="space-y-1.5 pt-2 border-t border-neutral-100 text-[11px] text-neutral-600">
-                    <div className="flex justify-between">
-                      <span>Batch of 2026 (Final Year):</span>
-                      <span className="font-semibold text-neutral-900">140 Candidates</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Batch of 2027 (Pre-Final):</span>
-                      <span className="font-semibold text-neutral-900">100 Candidates</span>
-                    </div>
-                    <div className="flex justify-between text-emerald-700">
-                      <span>Resume Grounding Verified:</span>
-                      <span className="font-semibold">100% Active</span>
-                    </div>
+                    {loadingStudents ? (
+                      <p className="text-neutral-400 italic">Loading student data…</p>
+                    ) : institutionStudents.length > 0 ? (
+                      <>
+                        <div className="flex justify-between">
+                          <span>With Resume:</span>
+                          <span className="font-semibold text-neutral-900">{institutionStudents.filter(s => s.has_resume).length} Students</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Without Resume:</span>
+                          <span className="font-semibold text-neutral-900">{institutionStudents.filter(s => !s.has_resume).length} Students</span>
+                        </div>
+                        <div className="flex justify-between text-emerald-700">
+                          <span>Active Accounts:</span>
+                          <span className="font-semibold">{institutionStudents.filter(s => s.account_status === 'ACTIVE').length} Active</span>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-neutral-400 italic">No students enrolled yet.</p>
+                    )}
                   </div>
                 </div>
 
@@ -722,6 +784,121 @@ export const PlatformOwnerPortal: React.FC = () => {
 
               </div>
 
+              {/* Student List Panel */}
+              {showStudentPanel && (
+                <div className="border border-neutral-200 rounded-2xl overflow-hidden">
+                  <div className="px-4 py-3 bg-neutral-50 border-b border-neutral-100 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-neutral-700 flex items-center space-x-1.5">
+                      <Users className="w-3.5 h-3.5 text-blue-600" />
+                      <span>Enrolled Students — {profileCollege.name}</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-neutral-400">{institutionStudents.length} records</span>
+                  </div>
+                  {loadingStudents ? (
+                    <div className="px-4 py-6 text-center text-xs text-neutral-400">Loading…</div>
+                  ) : institutionStudents.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-xs text-neutral-400">No students enrolled in this institution yet.</div>
+                  ) : (
+                    <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="sticky top-0 bg-neutral-50 border-b border-neutral-100 z-10">
+                          <tr>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">Name</th>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">Email</th>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">Program / Batch</th>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">Mock Coins</th>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">DB Credits</th>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">Status</th>
+                            <th className="text-left px-3 py-2 font-semibold text-neutral-500">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {institutionStudents.map((s) => {
+                            // Read localStorage coins for same-browser student session
+                            const lsCoins = (() => {
+                              try {
+                                const v = localStorage.getItem(`crp_student_coins_${s.id}`);
+                                return v !== null ? parseInt(v, 10) : null;
+                              } catch { return null; }
+                            })();
+                            const displayCoins = lsCoins !== null ? lsCoins : 5;
+                            const grantRes = grantResults[s.id];
+                            const isGranting = grantingStudentId === s.id;
+
+                            return (
+                              <React.Fragment key={s.id}>
+                                <tr className="border-b border-neutral-50 hover:bg-neutral-50/70">
+                                  <td className="px-3 py-2 font-medium text-neutral-900">{s.name}</td>
+                                  <td className="px-3 py-2 text-neutral-500 font-mono">{s.email}</td>
+                                  <td className="px-3 py-2 text-neutral-600">{s.program_name} · {s.batch_year}</td>
+                                  <td className="px-3 py-2">
+                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${displayCoins > 0 ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'}`}>
+                                      {grantRes ? grantRes.coinsSet : displayCoins} / 5
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 font-mono text-neutral-600">
+                                    {grantRes ? grantRes.newBalance : (s.db_credit_balance !== null ? Number(s.db_credit_balance) : '—')}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${s.account_status === 'ACTIVE' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                                      {s.account_status}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    {grantRes ? (
+                                      <span className="text-[10px] text-emerald-600 font-semibold">✓ Granted</span>
+                                    ) : (
+                                      <button
+                                        onClick={() => { setGrantingStudentId(isGranting ? null : s.id); setGrantAmount(100); }}
+                                        className="flex items-center space-x-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-[10px] font-semibold cursor-pointer transition-colors"
+                                      >
+                                        <Gift className="w-3 h-3" />
+                                        <span>Grant</span>
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                                {isGranting && (
+                                  <tr className="bg-indigo-50/40 border-b border-indigo-100">
+                                    <td colSpan={7} className="px-4 py-3">
+                                      <div className="flex items-center space-x-3">
+                                        <Coins className="w-4 h-4 text-indigo-600 shrink-0" />
+                                        <span className="text-xs font-medium text-indigo-900">Grant credits to <strong>{s.name}</strong></span>
+                                        <input
+                                          type="number"
+                                          min={1}
+                                          max={10000}
+                                          value={grantAmount}
+                                          onChange={e => setGrantAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                                          className="w-20 px-2 py-1 border border-indigo-300 rounded-lg text-xs text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                                        />
+                                        <span className="text-[10px] text-indigo-600">credits (Mock Interview coins capped at 5)</span>
+                                        <button
+                                          onClick={() => handleGrantCoins(s.id, grantAmount)}
+                                          disabled={grantLoading}
+                                          className="flex items-center space-x-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors"
+                                        >
+                                          {grantLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Gift className="w-3 h-3" />}
+                                          <span>{grantLoading ? 'Granting…' : 'Confirm Grant'}</span>
+                                        </button>
+                                        <button
+                                          onClick={() => setGrantingStudentId(null)}
+                                          className="text-[10px] text-neutral-400 hover:text-neutral-600 cursor-pointer"
+                                        >Cancel</button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
             </div>
 
             {/* Modal Footer */}
@@ -741,6 +918,14 @@ export const PlatformOwnerPortal: React.FC = () => {
               </button>
 
               <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setShowStudentPanel(v => !v)}
+                  className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl text-xs font-semibold flex items-center space-x-1.5 cursor-pointer transition-colors"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>{showStudentPanel ? 'Hide Students' : 'View Students'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => {

@@ -426,11 +426,12 @@ class ApiClient {
       }
     },
 
-    inviteSuperAdmin: async (collegeId: string, data: { firstName: string; lastName: string; email: string }): Promise<{ invite: PendingInvite; inviteUrl: string }> => {
+    inviteSuperAdmin: async (collegeId: string, data: { firstName: string; lastName: string; email: string }): Promise<{ invite: PendingInvite; inviteUrl: string; emailSent: boolean }> => {
       try {
         const response = await this.fetchAPI<{
           invite: any;
           inviteUrl: string;
+          emailSent: boolean;
         }>(`/owner/institutions/${collegeId}/invite`, {
           method: 'POST',
           body: JSON.stringify(data)
@@ -452,7 +453,12 @@ class ApiClient {
           expiresAt: response.invite.expiresAt
         };
 
-        return { invite, inviteUrl: response.inviteUrl };
+        // Warn if email wasn't sent (SMTP not configured)
+        if (!response.emailSent) {
+          console.warn('[inviteSuperAdmin] Invite created but email was NOT sent. Check SMTP configuration.');
+        }
+
+        return { invite, inviteUrl: response.inviteUrl, emailSent: response.emailSent };
       } catch (error) {
         console.error('Failed to invite Super Admin:', error);
         throw error;
@@ -494,6 +500,40 @@ class ApiClient {
       // Institution deletion is not implemented per team decision
       // See PLATFORM_OWNER_BACKEND_AUDIT_REPORT.md Section 5.2 Operation 12
       throw new Error('Institution deletion requires team architecture decision and is not currently supported. Please contact system administrator.');
+    },
+
+    getInstitutionStudents: async (collegeId: string, limit = 100): Promise<any[]> => {
+      try {
+        const response = await this.fetchAPI<{ students: any[]; total: number }>(
+          `/owner/institutions/${collegeId}/students?limit=${limit}`
+        );
+        return response.students;
+      } catch (error) {
+        console.error('Failed to fetch institution students:', error);
+        return [];
+      }
+    },
+
+    getStudentBalance: async (studentId: string): Promise<{ balance: number | null; hasAccount: boolean }> => {
+      try {
+        const response = await this.fetchAPI<{ balance: number | null; hasAccount: boolean }>(
+          `/owner/students/${studentId}/balance`
+        );
+        return response;
+      } catch {
+        return { balance: null, hasAccount: false };
+      }
+    },
+
+    grantStudentCoins: async (
+      studentId: string,
+      amount: number,
+      reason?: string
+    ): Promise<{ studentId: string; userId: string; studentName: string; amountGranted: number; newBalance: number; transactionId: string }> => {
+      return this.fetchAPI(`/owner/students/${studentId}/grant-coins`, {
+        method: 'POST',
+        body: JSON.stringify({ amount, reason: reason ?? 'Platform Owner grant' }),
+      });
     },
 
     getCollegeProfileMetrics: async (collegeId: string) => {
@@ -1152,19 +1192,6 @@ class ApiClient {
       const invites = this.getStorage<PendingInvite[]>('platform_pending_invites', []);
       const found = invites.find(inv => inv.token === token);
       if (found) return found;
-      if (token && token.toLowerCase().includes('demo')) {
-        return {
-          token,
-          email: 'admin.new@college.edu',
-          role: 'SUPER_ADMIN',
-          collegeId: 'col-1',
-          collegeName: 'National Institute of Technology',
-          name: 'Dr. Sarah Jenkins',
-          status: 'PENDING',
-          createdAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 86400000 * 3).toISOString()
-        };
-      }
       return null;
     },
 
@@ -1971,15 +1998,20 @@ class ApiClient {
     },
 
     me: async () => {
-      const saved = localStorage.getItem('auth_user');
-      if (saved) {
-        const u = JSON.parse(saved);
-        return { user: u, studentId: u.studentId || 'stu-21cs1084' };
+      // Delegates to getMe which calls the real backend GET /api/auth/me.
+      // Falls back to localStorage only if a token exists but the call fails.
+      try {
+        return await this.auth.getMe();
+      } catch (err) {
+        const saved = localStorage.getItem('auth_user');
+        if (saved) {
+          try {
+            const u = JSON.parse(saved);
+            return { user: u, studentId: u.studentId ?? null };
+          } catch {}
+        }
+        throw err;
       }
-      return {
-        user: { id: 'usr_guest', name: 'Aravind Kumar', email: 'aravind.k@college.edu', role: 'STUDENT' },
-        studentId: 'stu-21cs1084'
-      };
     }
   };
 
@@ -2006,7 +2038,7 @@ class ApiClient {
           mentorName: s.mentor_name || 'Not Assigned',
           mentorEmail: s.mentor_email || '',
           codingHandles: s.coding_handles || { leetcodeSolved: 0, githubRepos: 0 },
-          resume: s.resume || null,
+          resume: s.parsed_resume || s.resume || null,
           criteriaTasks: INITIAL_CRITERIA_TASKS, // Backend doesn't have this yet
           improvementChecklist: [], // Backend doesn't have this yet
           recentReports: s.recent_reports || [],
@@ -2029,6 +2061,18 @@ class ApiClient {
 
         // Last resort: return initial profile
         return INITIAL_STUDENT_PROFILE;
+      }
+    },
+
+    // Returns the student's credit balance from DB (source of truth for coins gate).
+    getCreditBalance: async (): Promise<{ balance: number; hasAccount: boolean; studentId?: string }> => {
+      try {
+        const response = await this.fetchAPI<{ balance: number; hasAccount: boolean; studentId?: string }>(
+          '/students/me/credits'
+        );
+        return response;
+      } catch {
+        return { balance: 0, hasAccount: false };
       }
     },
 
@@ -2102,59 +2146,64 @@ class ApiClient {
 
           const data = await response.json();
 
-          // Refresh profile to get updated resume
+          // Backend now returns resumeData directly from the parse step.
+          // If parsing succeeded, use the structured data; otherwise refresh profile.
+          const resumeData = data?.data?.resumeData as ParsedResume | null;
+          if (resumeData && resumeData.skills) {
+            try {
+              const cached = localStorage.getItem(`student_profile_${studentId}`);
+              if (cached) {
+                const profile = JSON.parse(cached);
+                profile.resume = resumeData;
+                this.setStorage(`student_profile_${studentId}`, profile);
+                this.setStorage('student_profile', profile);
+              }
+            } catch {}
+            return resumeData;
+          }
+
+          // Fallback: refresh full profile (parse may have failed non-fatally)
           const updated = await this.student.getProfile(studentId);
           return updated.resume || {
-            fileName: 'Uploaded Resume',
+            fileName: 'resume.pdf',
             parsedAt: new Date().toISOString().split('T')[0],
-            summary: 'Resume uploaded successfully',
+            summary: null as any,
             skills: { languages: [], frameworks: [], databases: [], tools: [] },
             projects: []
           };
         }
 
-        // Otherwise, use client-side parsing (fallback/mock behavior)
-        let parsed: ParsedResume;
-
+        // Already a fully-structured ParsedResume — use as-is
         if ('skills' in payload && 'projects' in payload) {
-          parsed = payload as ParsedResume;
-        } else {
-          const rawText = (payload as any)?.resumeText || '';
-          const fileName = (payload as any)?.fileName || 'Uploaded_Resume.pdf';
-
-          const extractedLanguages: string[] = [];
-          const langMap = ['Python', 'Java', 'TypeScript', 'JavaScript', 'C++', 'Go', 'Rust', 'SQL', 'C#', 'PHP'];
-          langMap.forEach(l => {
-            if (new RegExp(`\\b${l}\\b`, 'i').test(rawText)) extractedLanguages.push(l);
-          });
-
-          const extractedFrameworks: string[] = [];
-          const frameMap = ['React', 'Node.js', 'Spring Boot', 'FastAPI', 'Express', 'Django', 'Docker', 'Kubernetes', 'Tailwind', 'Next.js', 'PyTorch', 'TensorFlow'];
-          frameMap.forEach(f => {
-            if (new RegExp(`\\b${f.replace('.', '\\.')}\\b`, 'i').test(rawText)) extractedFrameworks.push(f);
-          });
-
-          parsed = {
-            fileName,
-            parsedAt: new Date().toISOString().split('T')[0],
-            summary: extractedLanguages.length > 0
-              ? `Specialized candidate with expertise in ${extractedLanguages.join(', ')} and ${extractedFrameworks.slice(0, 3).join(', ')}.`
-              : 'Software Engineering candidate with hands-on full-stack development experience.',
-            skills: {
-              languages: extractedLanguages.length > 0 ? extractedLanguages : ['Java', 'TypeScript', 'SQL', 'Python'],
-              frameworks: extractedFrameworks.length > 0 ? extractedFrameworks : ['Spring Boot', 'React', 'Tailwind CSS', 'Docker'],
-              databases: ['PostgreSQL', 'Redis'],
-              tools: ['Git', 'Docker', 'Kafka']
-            },
-            projects: [
-              {
-                title: rawText.includes('Platform') ? 'Communication & Placement Engine' : 'High-Throughput Distributed Microservice',
-                description: 'Designed and deployed low-latency transactional workflows with automated telemetry and resilience testing.',
-                techStack: extractedLanguages.concat(extractedFrameworks).slice(0, 4)
-              }
-            ]
-          };
+          return payload as ParsedResume;
         }
+
+        // Plain text paste: lightweight client-side keyword extraction (no fake data)
+        const rawText = (payload as any)?.resumeText || '';
+        const fileName = (payload as any)?.fileName || 'pasted_resume.txt';
+
+        const langMap = ['Python', 'Java', 'TypeScript', 'JavaScript', 'C++', 'Go', 'Rust', 'SQL', 'C#', 'PHP', 'Kotlin', 'Swift'];
+        const frameMap = ['React', 'Node.js', 'Spring Boot', 'FastAPI', 'Express', 'Django', 'Docker', 'Kubernetes', 'Tailwind', 'Next.js', 'PyTorch', 'TensorFlow', 'Angular', 'Vue'];
+        const dbMap = ['PostgreSQL', 'MySQL', 'MongoDB', 'Redis', 'SQLite', 'Cassandra', 'Oracle', 'DynamoDB'];
+
+        const extractedLanguages = langMap.filter(l => new RegExp(`\\b${l}\\b`, 'i').test(rawText));
+        const extractedFrameworks = frameMap.filter(f => new RegExp(`\\b${f.replace('.', '\\.')}\\b`, 'i').test(rawText));
+        const extractedDatabases = dbMap.filter(d => new RegExp(`\\b${d}\\b`, 'i').test(rawText));
+
+        const parsed: ParsedResume = {
+          fileName,
+          parsedAt: new Date().toISOString().split('T')[0],
+          summary: extractedLanguages.length > 0
+            ? `Candidate with expertise in ${[...extractedLanguages, ...extractedFrameworks].slice(0, 5).join(', ')}.`
+            : null as any,
+          skills: {
+            languages: extractedLanguages,
+            frameworks: extractedFrameworks,
+            databases: extractedDatabases,
+            tools: [],
+          },
+          projects: [],
+        };
 
         const current = await this.student.getProfile(studentId);
         current.resume = parsed;
@@ -2199,22 +2248,56 @@ class ApiClient {
 
   interview = {
     start: async (studentId: string, type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'PRACTICE' = 'MOCK_INTERVIEW'): Promise<{ sessionId: string; firstQuestion: QuestionTurn }> => {
-      const sessionId = `ses_${Date.now()}`;
-      const student = await this.student.getProfile(studentId);
-      const dynamicTurns = generateDynamicQuestions(student);
-      const firstQ = dynamicTurns[0];
+      try {
+        // Call backend to create session
+        const sessionResponse = await this.fetchAPI<{ sessionId: string; attemptId: string }>('/sessions', {
+          method: 'POST',
+          body: JSON.stringify({ studentId, goal: 'Improve technical skills' })
+        });
 
-      const sessionData = {
-        sessionId,
-        type,
-        turnIndex: 0,
-        questions: [firstQ],
-        plannedTurns: dynamicTurns,
-        tabSwitches: 0
-      };
-      this.setStorage(`interview_${sessionId}`, sessionData);
+        // Call backend to get first question
+        const questionResponse = await this.fetchAPI<{
+          question_text: string;
+          difficulty: string;
+          category: string;
+          turn_number: number;
+        }>(`/sessions/${sessionResponse.sessionId}/next-question`);
 
-      return { sessionId, firstQuestion: firstQ };
+        const firstQuestion: QuestionTurn = {
+          id: `q_${questionResponse.turn_number}`,
+          questionNumber: questionResponse.turn_number,
+          questionText: questionResponse.question_text,
+          difficulty: questionResponse.difficulty as any,
+          category: questionResponse.category
+        };
+
+        // Store session data locally for tracking
+        this.setStorage(`interview_${sessionResponse.sessionId}`, {
+          sessionId: sessionResponse.sessionId,
+          type,
+          turnIndex: 0,
+          questions: [firstQuestion],
+          tabSwitches: 0
+        });
+
+        return { sessionId: sessionResponse.sessionId, firstQuestion };
+      } catch (error) {
+        console.error('Failed to start interview session:', error);
+        // Fallback to mock for development
+        const sessionId = `ses_mock_${Date.now()}`;
+        const student = await this.student.getProfile(studentId);
+        const dynamicTurns = generateDynamicQuestions(student);
+        const firstQ = dynamicTurns[0];
+        this.setStorage(`interview_${sessionId}`, {
+          sessionId,
+          type,
+          turnIndex: 0,
+          questions: [firstQ],
+          plannedTurns: dynamicTurns,
+          tabSwitches: 0
+        });
+        return { sessionId, firstQuestion: firstQ };
+      }
     },
 
     recordProctorEvent: async (sessionId: string, _eventType: 'TAB_SWITCH' | 'FULLSCREEN_EXIT') => {
@@ -2229,22 +2312,122 @@ class ApiClient {
       const sess = this.getStorage<any>(`interview_${sessionId}`, {
         turnIndex: 0,
         questions: [],
-        plannedTurns: [],
         tabSwitches: 0
       });
 
-      const student = await this.student.getProfile();
       const turnIdx = sess.turnIndex || 0;
-      const currentQ = sess.questions[turnIdx] || (sess.plannedTurns && sess.plannedTurns[turnIdx]) || MOCK_INTERVIEW_QUESTIONS[0];
+      const currentQ = sess.questions[turnIdx];
 
-      const evalResult = evaluateDynamicAnswer(currentQ, studentAnswer, turnIdx, durationSeconds, student);
+      // Try backend first, fall back to mock if session is mock or backend fails
+      const isMockSession = sessionId.startsWith('ses_mock_');
+
+      if (!isMockSession && currentQ) {
+        try {
+          // Call backend to evaluate and get status
+          const response = await this.fetchAPI<{
+            isCompleted: boolean;
+            turnEvaluation: any;
+            nextQuestionAvailable: boolean;
+          }>(`/sessions/${sessionId}/submit-answer`, {
+            method: 'POST',
+            body: JSON.stringify({
+              question_text: currentQ.questionText,
+              student_answer: studentAnswer,
+              duration_seconds: durationSeconds
+            })
+          });
+
+          const turnEvaluation: QuestionTurn = {
+            id: currentQ.id,
+            questionNumber: currentQ.questionNumber,
+            questionText: currentQ.questionText,
+            difficulty: currentQ.difficulty,
+            category: currentQ.category,
+            studentAnswer,
+            technicalScore: response.turnEvaluation.technical_score,
+            communicationScore: response.turnEvaluation.communication_score,
+            wpm: response.turnEvaluation.wpm,
+            fillerWords: response.turnEvaluation.filler_words,
+            feedback: response.turnEvaluation.feedback,
+            strengths: response.turnEvaluation.strengths,
+            weaknesses: response.turnEvaluation.weaknesses
+          };
+
+          sess.questions[turnIdx] = turnEvaluation;
+          sess.turnIndex = turnIdx + 1;
+
+          let nextQuestion: QuestionTurn | undefined = undefined;
+          let finalReport: DiagnosticReport | undefined = undefined;
+
+          if (!response.isCompleted && response.nextQuestionAvailable) {
+            // Fetch next question
+            const nextQ = await this.fetchAPI<{
+              question_text: string;
+              difficulty: string;
+              category: string;
+              turn_number: number;
+            }>(`/sessions/${sessionId}/next-question`);
+
+            nextQuestion = {
+              id: `q_${nextQ.turn_number}`,
+              questionNumber: nextQ.turn_number,
+              questionText: nextQ.question_text,
+              difficulty: nextQ.difficulty as any,
+              category: nextQ.category
+            };
+
+            sess.questions.push(nextQuestion);
+          } else if (response.isCompleted) {
+            // Generate final report
+            const student = await this.student.getProfile();
+            finalReport = synthesizeDynamicReport(
+              sess.type || 'MOCK_INTERVIEW',
+              sess.questions,
+              student,
+              sess.tabSwitches || 0
+            );
+
+            // Call backend conclude endpoint
+            await this.fetchAPI(`/sessions/${sessionId}/conclude`, {
+              method: 'POST',
+              body: JSON.stringify({
+                overallScore: finalReport.overallScore,
+                technicalScore: finalReport.technicalScore,
+                communicationScore: finalReport.communicationScore
+              })
+            });
+
+            student.recentReports = [finalReport, ...(student.recentReports || [])];
+            this.setStorage(`student_profile_${student.id}`, student);
+            this.setStorage('student_profile', student);
+          }
+
+          this.setStorage(`interview_${sessionId}`, sess);
+
+          return {
+            isCompleted: response.isCompleted,
+            turnEvaluation,
+            nextQuestion,
+            finalReport
+          };
+        } catch (error) {
+          console.error('Backend submit answer failed, falling back to mock:', error);
+          // Fall through to mock implementation
+        }
+      }
+
+      // Mock implementation (fallback)
+      const student = await this.student.getProfile();
+      const currentQFallback = currentQ || MOCK_INTERVIEW_QUESTIONS[0];
+
+      const evalResult = evaluateDynamicAnswer(currentQFallback, studentAnswer, turnIdx, durationSeconds, student);
 
       const turnEvaluation: QuestionTurn = {
-        id: currentQ.id || `q_${turnIdx + 1}`,
+        id: currentQFallback.id || `q_${turnIdx + 1}`,
         questionNumber: turnIdx + 1,
-        questionText: currentQ.questionText,
-        difficulty: (turnIdx === 0 ? 'EASY' : turnIdx === 1 ? 'MEDIUM' : 'ADVANCED'),
-        category: currentQ.category,
+        questionText: currentQFallback.questionText,
+        difficulty: (turnIdx === 0 ? 'EASY' : turnIdx === 1 ? 'MEDIUM' : 'ADVANCED') as any,
+        category: currentQFallback.category,
         studentAnswer,
         technicalScore: evalResult.technicalScore,
         communicationScore: evalResult.communicationScore,
@@ -2263,14 +2446,13 @@ class ApiClient {
 
       if (!isCompleted) {
         const nextDiff = turnIdx === 0 ? 'MEDIUM' : 'ADVANCED';
-        const fallbackNext = sess.plannedTurns && sess.plannedTurns[turnIdx + 1] ? sess.plannedTurns[turnIdx + 1].questionText : "Walk me through how you handle distributed latency.";
-        const nextQText = evalResult.nextQuestionText || fallbackNext;
+        const nextQText = evalResult.nextQuestionText || "Walk me through how you handle distributed latency.";
 
         nextQuestion = {
           id: `q_${turnIdx + 2}_${Date.now()}`,
           questionNumber: turnIdx + 2,
           questionText: nextQText,
-          difficulty: nextDiff,
+          difficulty: nextDiff as any,
           category: turnIdx === 0 ? 'Scalability & Concurrency' : 'Resilience & Architecture'
         };
 
@@ -2287,14 +2469,6 @@ class ApiClient {
         student.recentReports = [finalReport, ...(student.recentReports || [])];
         this.setStorage(`student_profile_${student.id}`, student);
         this.setStorage('student_profile', student);
-
-        const candidates = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
-        const cIdx = candidates.findIndex(c => c.name === student.name || c.id === student.id);
-        if (cIdx !== -1) {
-          candidates[cIdx].score = finalReport.overallScore;
-          candidates[cIdx].status = finalReport.overallScore >= 80 ? 'PLACEMENT_READY' : finalReport.overallScore >= 70 ? 'ON_TRACK' : 'NEEDS_ATTENTION';
-          this.setStorage('admin_students', candidates);
-        }
       }
 
       this.setStorage(`interview_${sessionId}`, sess);
@@ -2314,12 +2488,67 @@ class ApiClient {
       return synthesizeDynamicReport(sess.type || 'MOCK_INTERVIEW', sess.questions || [], student, sess.tabSwitches || 0);
     },
 
-    getReport: async (_sessionId: string): Promise<DiagnosticReport> => {
-      const student = await this.student.getProfile();
-      if (student.recentReports && student.recentReports.length > 0) {
-        return student.recentReports[0];
+    conclude: async (
+      sessionId: string,
+      scores: { overallScore: number; technicalScore?: number; communicationScore?: number; listeningScore?: number }
+    ): Promise<{ message: string; attemptId: string }> => {
+      return this.fetchAPI<{ message: string; attemptId: string }>(`/sessions/${sessionId}/conclude`, {
+        method: 'POST',
+        body: JSON.stringify(scores)
+      });
+    },
+
+    getReport: async (attemptId: string): Promise<DiagnosticReport> => {
+      try {
+        const response = await this.fetchAPI<{
+          attemptId: string;
+          studentId: string;
+          overallScore: number;
+          technicalScore: number;
+          communicationScore: number;
+          listeningScore?: number;
+          componentScores: any;
+          skillScores: any;
+          generatedAt: string;
+          questionBreakdown: Array<{
+            sequenceNo: number;
+            questionText: string;
+            technicalScore: number;
+            communicationScore: number;
+            feedback: string;
+            strengths: string[];
+            weaknesses: string[];
+          }>;
+        }>(`/reports/${attemptId}`);
+
+        const breakdown = response.questionBreakdown || [];
+        const weaknesses = breakdown.flatMap(b => b.weaknesses || []).filter(Boolean);
+
+        const report: DiagnosticReport = {
+          id: response.attemptId,
+          date: response.generatedAt || new Date().toISOString(),
+          sessionType: 'MOCK_INTERVIEW',
+          overallScore: response.overallScore,
+          technicalScore: response.technicalScore || 0,
+          communicationScore: response.communicationScore || 0,
+          averageWpm: 0,
+          totalFillerWords: 0,
+          fillerWordBreakdown: {},
+          skillBreakdown: response.skillScores || [],
+          actionableNextSteps: weaknesses.length > 0 ? weaknesses : ['Review your answers and focus on areas for improvement.'],
+          tabSwitches: response.componentScores?.tab_switch_count || 0,
+          isFlagged: response.componentScores?.is_proctor_flagged || false,
+        };
+
+        return report;
+      } catch (error) {
+        console.error('Failed to fetch report from backend, using fallback:', error);
+        const student = await this.student.getProfile();
+        if (student.recentReports && student.recentReports.length > 0) {
+          return student.recentReports[0];
+        }
+        return synthesizeDynamicReport('MOCK_INTERVIEW', [], student, 0);
       }
-      return synthesizeDynamicReport('MOCK_INTERVIEW', [], student, 0);
     }
   };
 
@@ -2357,99 +2586,39 @@ class ApiClient {
       }
     },
 
-    // Existing localStorage-based session management (kept for current workflow)
-    start: async (_studentId: string, passageIndex?: number) => {
-      const pIdx = passageIndex !== undefined ? (passageIndex % LISTENING_PASSAGES.length) : Math.floor(Math.random() * LISTENING_PASSAGES.length);
-      const selectedPassage = LISTENING_PASSAGES[pIdx];
-      const sessionId = `lis_${Date.now()}`;
-      
-      this.setStorage(`listening_${sessionId}`, {
-        passage: selectedPassage,
-        replaysUsed: 0,
-        answers: []
-      });
-
-      return {
-        sessionId,
-        passage: selectedPassage,
-        replaysUsed: 0,
-        maxReplays: 2
-      };
+    start: async (_studentId: string, passageIndex?: number, storyId?: string) => {
+      const body: Record<string, unknown> = {};
+      if (storyId) body.storyId = storyId;
+      const response = await this.fetchAPI<{
+        sessionId: string;
+        storyId: string;
+        title: string;
+        content: string;
+        difficulty: string;
+        questions: any[];
+        maxReplays: number;
+        replaysUsed: number;
+      }>('/listening/sessions', { method: 'POST', body: JSON.stringify(body) });
+      return response;
     },
 
     recordReplay: async (sessionId: string) => {
-      const sess = this.getStorage<any>(`listening_${sessionId}`, { replaysUsed: 0 });
-      sess.replaysUsed = (sess.replaysUsed || 0) + 1;
-      this.setStorage(`listening_${sessionId}`, sess);
-      return { replaysUsed: sess.replaysUsed };
+      await this.fetchAPI<{ recorded: boolean }>(
+        `/listening/sessions/${sessionId}/replay`,
+        { method: 'POST', body: '{}' }
+      );
+      return { replaysUsed: 1 };
     },
 
-    submitAnswers: async (sessionId: string, answers: { questionId: string; answerText: string }[]) => {
-      const sess = this.getStorage<any>(`listening_${sessionId}`, {
-        passage: LISTENING_PASSAGES[0],
-        replaysUsed: 0
-      });
-      const passage = sess.passage || LISTENING_PASSAGES[0];
-      const student = await this.student.getProfile();
-
-      let totalScore = 0;
-      const evaluations = answers.map((ans, idx) => {
-        const qObj = passage.questions[idx] || passage.questions[0];
-        const lowerAnswer = ans.answerText.toLowerCase();
-        const keywords = qObj.keywords || [];
-
-        let score = 65;
-        let matchedKeywords = 0;
-        keywords.forEach((k: string) => {
-          if (lowerAnswer.includes(k.toLowerCase())) {
-            matchedKeywords++;
-            score += 10;
-          }
-        });
-
-        if (ans.answerText.trim().length > 20) score += 5;
-        score = Math.min(98, score);
-        totalScore += score;
-
-        return {
-          questionIndex: idx,
-          questionText: qObj.questionText,
-          studentAnswer: ans.answerText,
-          expectedAnswer: qObj.expectedAnswer,
-          score,
-          matchedKeywords,
-          feedback: score >= 80 
-            ? 'Accurately captured key architectural requirements.'
-            : 'Partially captured requirement. Review technical constraints in the passage.'
-        };
-      });
-
-      const avgScore = Math.round(totalScore / Math.max(1, answers.length));
-
-      const turns: QuestionTurn[] = evaluations.map((ev, i) => ({
-        id: `lis_q_${i + 1}`,
-        questionNumber: i + 1,
-        questionText: ev.questionText,
-        difficulty: 'MEDIUM',
-        studentAnswer: ev.studentAnswer,
-        technicalScore: ev.score,
-        communicationScore: Math.min(95, ev.score + 2),
-        wpm: 126,
-        fillerWords: 1,
-        feedback: ev.feedback
-      }));
-
-      const finalReport = synthesizeDynamicReport('LISTENING_COMPREHENSION', turns, student, 0);
-      finalReport.overallScore = avgScore;
-
-      student.recentReports = [finalReport, ...(student.recentReports || [])];
-      this.setStorage(`student_profile_${student.id}`, student);
-      this.setStorage('student_profile', student);
-
+    submitAnswers: async (sessionId: string, answers: { questionId: string; answerText: string }[], storyId?: string) => {
+      const response = await this.fetchAPI<{ overallScore: number; evaluations: any[]; storyId: string }>(
+        `/listening/sessions/${sessionId}/submit`,
+        { method: 'POST', body: JSON.stringify({ ...(storyId ? { storyId } : {}), answers }) }
+      );
       return {
-        overallScore: avgScore,
-        evaluations,
-        finalReport
+        overallScore: response.overallScore,
+        evaluations: response.evaluations,
+        finalReport: null,
       };
     }
   };
@@ -2464,64 +2633,19 @@ class ApiClient {
     },
 
     sendMessage: async (sessionId: string, message: string) => {
-      const lower = message.toLowerCase();
-      let assistantReply = "Structure your answer using the STAR framework (Situation, Task, Action, Result). State the latency or scale bottleneck in the first sentence, explain your design choices, and conclude with verified performance metrics.";
-      
-      let technicalTerms = [
-        { term: 'Event-driven Architecture', definition: 'A design pattern where state changes trigger decoupled asynchronous processing.', betterAlternativeTo: 'Sending calls back and forth' },
-        { term: 'Idempotency', definition: 'Ensuring an operation produces the identical outcome even if executed repeatedly.', betterAlternativeTo: 'Making sure we do not duplicate requests' }
-      ];
-
-      let commSuggestions = [
-        'Lead with the high-level trade-off before diving into implementation details.',
-        'Use transition phrasing such as "From a throughput perspective" or "To preserve data consistency".'
-      ];
-
-      let structuralAdvice = [
-        'Framework: Problem Scope -> Architectural Decision -> Benchmark Impact (latency, memory, or throughput).'
-      ];
-
-      if (lower.includes('pacing') || lower.includes('speed') || lower.includes('wpm')) {
-        assistantReply = "For technical interviews, optimal speaking pace is between 120 and 150 words per minute. If you feel rushed, deliberately pause for 1 second between clauses instead of filling silence with vocal fillers.";
-        commSuggestions = [
-          'Take a breath before answering complex architectural questions.',
-          'Replace fillers with purposeful pauses to signal deliberate thinking.'
-        ];
-      } else if (lower.includes('filler') || lower.includes('um') || lower.includes('like')) {
-        assistantReply = "Filler words usually happen when your brain plans the next sentence faster than you speak. Ground your answers in bullet points in your head before speaking.";
-        commSuggestions = [
-          'Pause rather than saying "basically" or "sort of".',
-          'Conclude statements with confidence rather than trailing off.'
-        ];
-      } else if (lower.includes('database') || lower.includes('scale') || lower.includes('system design')) {
-        technicalTerms = [
-          { term: 'Connection Pooling', definition: 'Reusing a cache of database connections to minimize overhead on concurrent requests.', betterAlternativeTo: 'Opening a new database connection each time' },
-          { term: 'Sharding & Replication', definition: 'Splitting datasets across multiple database instances to scale read and write throughput.', betterAlternativeTo: 'Making the database bigger' }
-        ];
-        structuralAdvice = [
-          'Structure: Read vs. Write Ratios -> Indexing Strategy -> Cache Invalidation -> Fallback Mechanism.'
-        ];
+      try {
+        const response = await this.fetchAPI<{ userMessage: any; assistantMessage: any; sessionId: string | null }>(
+          '/suggestions/message',
+          { method: 'POST', body: JSON.stringify({ message, sessionId }) }
+        );
+        return {
+          userMessage: response.userMessage,
+          assistantMessage: response.assistantMessage,
+        };
+      } catch (err) {
+        console.error('[suggestions] sendMessage failed:', err);
+        throw err;
       }
-
-      const userMsg = { id: `msg_${Date.now()}_u`, role: 'user', content: message, createdAt: new Date().toISOString() };
-      const assistantMsg = {
-        id: `msg_${Date.now()}_a`,
-        role: 'assistant' as const,
-        content: assistantReply,
-        technicalTerminology: technicalTerms,
-        communicationSuggestions: commSuggestions,
-        structuralAdvice,
-        createdAt: new Date().toISOString()
-      };
-
-      const hist = this.getStorage<any[]>(`sug_hist_${sessionId}`, []);
-      hist.push(userMsg, assistantMsg);
-      this.setStorage(`sug_hist_${sessionId}`, hist);
-
-      return {
-        userMessage: userMsg,
-        assistantMessage: assistantMsg
-      };
     }
   };
 
@@ -2577,91 +2701,90 @@ class ApiClient {
       }
     },
 
-    // Existing localStorage-based methods (kept for demo/fallback)
     getCoordinatorStats: async () => {
-      const students = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
-      const programs = this.getStorage<DynamicProgram[]>('platform_dynamic_programs', MOCK_DYNAMIC_PROGRAMS);
-      const totalCandidates = students.length;
-      const readyCount = students.filter(s => (s.score || 0) >= 75).length;
-      const placementReadyRate = Math.round((readyCount / Math.max(1, totalCandidates)) * 100);
-
-      return {
-        totalCandidates: totalCandidates || 240,
-        activeProgramsCount: programs.length,
-        placementReadyRate: placementReadyRate || 72,
-        readyCount: readyCount || 172
-      };
+      try {
+        const [students, mentors, admins] = await Promise.all([
+          this.admin.getUsers({ role: 'STUDENT' }),
+          this.admin.getUsers({ role: 'FACULTY_MENTOR' }),
+          this.admin.getUsers({ role: 'PROGRAM_ADMIN' }),
+        ]);
+        return {
+          totalCandidates: students.length,
+          activeProgramsCount: admins.length,
+          placementReadyRate: 0,
+          readyCount: 0,
+          facultyMentorsCount: mentors.length,
+          programAdminsCount: admins.length,
+        };
+      } catch {
+        return { totalCandidates: 0, activeProgramsCount: 0, placementReadyRate: 0, readyCount: 0 };
+      }
     },
 
     getSystemStats: async () => {
-      const students = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
-      const trainers = this.getStorage<any[]>('trainer_tenures', MOCK_TRAINER_TENURES);
-      const mentors = this.getStorage<any[]>('admin_faculty_mentors', [
-        { id: 'fm-1', name: 'Dr. Ananya Sharma', email: 'ananya.sharma@college.edu', department: 'CSE', assignedMenteesCount: 24 }
-      ]);
-      const admins = this.getStorage<any[]>('admin_program_admins', [
-        { id: 'pa-1', name: 'Dr. K. Swaminathan', email: 'swaminathan@college.edu', department: 'CSE' }
-      ]);
-
-      return {
-        programAdminsCount: admins.length,
-        facultyMentorsCount: mentors.length,
-        trainersCount: trainers.filter(t => t.isActive).length,
-        studentsCount: students.length
-      };
+      try {
+        const [students, mentors, admins, trainers] = await Promise.all([
+          this.admin.getUsers({ role: 'STUDENT' }),
+          this.admin.getUsers({ role: 'FACULTY_MENTOR' }),
+          this.admin.getUsers({ role: 'PROGRAM_ADMIN' }),
+          this.admin.getUsers({ role: 'TRAINER' }),
+        ]);
+        return {
+          studentsCount: students.length,
+          facultyMentorsCount: mentors.length,
+          programAdminsCount: admins.length,
+          trainersCount: trainers.length,
+        };
+      } catch {
+        return { studentsCount: 0, facultyMentorsCount: 0, programAdminsCount: 0, trainersCount: 0 };
+      }
     },
 
     getProgramAdmins: async (): Promise<any[]> => {
-      return this.getStorage<any[]>('admin_program_admins', [
-        { id: 'pa-1', name: 'Dr. K. Swaminathan', email: 'swaminathan@college.edu', department: 'CSE', createdAt: '2026-01-10' }
-      ]);
+      try {
+        return await this.admin.getUsers({ role: 'PROGRAM_ADMIN' });
+      } catch {
+        return [];
+      }
     },
 
     createProgramAdmin: async (data: { name: string; email: string; password?: string }) => {
-      const admins = this.getStorage<any[]>('admin_program_admins', []);
-      const newAdmin = { id: `pa_${Date.now()}`, ...data, createdAt: new Date().toISOString().split('T')[0] };
-      admins.push(newAdmin);
-      this.setStorage('admin_program_admins', admins);
-      return newAdmin;
+      const response = await this.fetchAPI<{ user: any }>(
+        '/admin/users',
+        { method: 'POST', body: JSON.stringify({ name: data.name, email: data.email, role: 'PROGRAM_ADMIN' }) }
+      );
+      return response.user;
     },
 
     getFacultyMentors: async (): Promise<any[]> => {
-      return this.getStorage<any[]>('admin_faculty_mentors', [
-        { id: 'fm-1', name: 'Dr. Ananya Sharma', email: 'ananya.sharma@college.edu', department: 'CSE', assignedMenteesCount: 24 },
-        { id: 'fm-2', name: 'Prof. R. Venkatesh', email: 'venkatesh.r@college.edu', department: 'IT', assignedMenteesCount: 22 }
-      ]);
+      try {
+        return await this.admin.getUsers({ role: 'FACULTY_MENTOR' });
+      } catch {
+        return [];
+      }
     },
 
     createFacultyMentor: async (data: { name: string; email: string; password?: string }) => {
-      const mentors = this.getStorage<any[]>('admin_faculty_mentors', []);
-      const newMentor = { id: `fm_${Date.now()}`, ...data, assignedMenteesCount: 0 };
-      mentors.push(newMentor);
-      this.setStorage('admin_faculty_mentors', mentors);
-      return newMentor;
+      const response = await this.fetchAPI<{ user: any }>(
+        '/admin/users',
+        { method: 'POST', body: JSON.stringify({ name: data.name, email: data.email, role: 'FACULTY_MENTOR' }) }
+      );
+      return response.user;
     },
 
     assignMentor: async (studentId: string, mentorId: string) => {
-      const students = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
-      const updated = students.map(s => s.id === studentId ? { ...s, mentorId } : s);
-      this.setStorage('admin_students', updated);
-      return { message: 'Mentor assigned successfully' };
+      return this.fetchAPI<{ assignment: any }>(
+        '/mentors/assign',
+        { method: 'POST', body: JSON.stringify({ studentId, mentorId }) }
+      );
     },
 
     createStudent: async (data: any) => {
-      const students = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
-      const newStudent = {
-        id: `stu_${Date.now()}`,
-        name: data.name,
-        rollNumber: data.rollNumber || `22CS${Math.floor(1000 + Math.random() * 9000)}`,
-        track: data.track || 'General Track',
-        domain: data.domain || 'Technical Architecture',
-        score: data.score || 75,
-        checklist: '0/5',
-        status: 'ON_TRACK'
-      };
-      students.unshift(newStudent);
-      this.setStorage('admin_students', students);
-      return newStudent;
+      const response = await this.fetchAPI<{ user: any }>(
+        '/admin/users',
+        { method: 'POST', body: JSON.stringify({ name: data.name, email: data.email || `${Date.now()}@placeholder.edu`, role: 'STUDENT' }) }
+      );
+      return response.user;
     },
 
     createStudentByMentor: async (data: any) => {
@@ -2669,9 +2792,11 @@ class ApiClient {
     },
 
     deleteUser: async (userId: string) => {
-      const students = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST).filter(s => s.id !== userId);
-      this.setStorage('admin_students', students);
-      return { success: true, message: 'User removed successfully' };
+      await this.fetchAPI<{ user: any }>(
+        `/admin/users/${userId}/status`,
+        { method: 'PATCH', body: JSON.stringify({ status: 'INACTIVE' }) }
+      );
+      return { success: true, message: 'User deactivated successfully' };
     },
 
     getStudentFullHistory: async (studentId: string) => {
@@ -2745,95 +2870,131 @@ class ApiClient {
     },
 
     getStudents: async (params: { cohort?: string; search?: string } = {}) => {
-      let list = this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
-      const existingIds = new Set(list.map(s => s.id || s.rollNumber));
-      let updated = false;
-      for (const m of MOCK_MENTEES_LIST) {
-        if (!existingIds.has(m.id) && !existingIds.has(m.rollNumber)) {
-          list.push(m);
-          updated = true;
-        }
+      try {
+        const filters: { role: string; search?: string } = { role: 'STUDENT' };
+        if (params.search) filters.search = params.search;
+        return await this.admin.getUsers(filters);
+      } catch {
+        return [];
       }
-      if (updated) {
-        this.setStorage('admin_students', list);
-      }
-      if (params.search) {
-        const s = params.search.toLowerCase();
-        list = list.filter(item => 
-          item.name.toLowerCase().includes(s) || 
-          (item.rollNumber && item.rollNumber.toLowerCase().includes(s)) ||
-          (item.batchYear && String(item.batchYear).includes(s))
-        );
-      }
-      return list;
     },
 
     getMentorMentees: async (_mentorId?: string) => {
-      return this.getStorage<any[]>('admin_students', MOCK_MENTEES_LIST);
+      try {
+        const response = await this.fetchAPI<{ students: any[] }>('/mentors/my-students');
+        return response.students || [];
+      } catch {
+        return [];
+      }
     },
 
     getTrainerTenures: async (): Promise<TrainerTenure[]> => {
-      return this.getStorage<TrainerTenure[]>('trainer_tenures', MOCK_TRAINER_TENURES);
+      try {
+        const users = await this.admin.getUsers({ role: 'TRAINER' });
+        return users.map((u: any) => ({
+          id: u.id,
+          userId: u.id,
+          trainerName: u.name,
+          trainerEmail: u.email,
+          companyOrInstitute: '',
+          domain: '',
+          startDate: u.created_at?.split('T')[0] ?? '',
+          endDate: '',
+          isActive: u.status === 'ACTIVE',
+        }));
+      } catch {
+        return [];
+      }
     },
 
     onboardTrainer: async (trainer: Omit<TrainerTenure, 'id' | 'isActive'>): Promise<TrainerTenure> => {
-      const tenures = this.getStorage<TrainerTenure[]>('trainer_tenures', MOCK_TRAINER_TENURES);
-      const newT: TrainerTenure = { id: `ten_${Date.now()}`, ...trainer, isActive: true };
-      tenures.push(newT);
-      this.setStorage('trainer_tenures', tenures);
-      return newT;
+      const response = await this.fetchAPI<{ user: any }>(
+        '/admin/users',
+        { method: 'POST', body: JSON.stringify({ name: trainer.trainerName, email: trainer.trainerEmail, role: 'TRAINER' }) }
+      );
+      const user = response.user;
+      return {
+        id: user.id,
+        userId: user.id,
+        trainerName: user.name,
+        trainerEmail: user.email,
+        companyOrInstitute: trainer.companyOrInstitute,
+        domain: trainer.domain,
+        startDate: trainer.startDate,
+        endDate: trainer.endDate,
+        isActive: true,
+      };
     },
 
     revokeTrainer: async (id: string): Promise<void> => {
-      const tenures = this.getStorage<TrainerTenure[]>('trainer_tenures', MOCK_TRAINER_TENURES);
-      const updated = tenures.map(t => t.id === id ? { ...t, isActive: false } : t);
-      this.setStorage('trainer_tenures', updated);
+      await this.fetchAPI<{ user: any }>(
+        `/admin/users/${id}/status`,
+        { method: 'PATCH', body: JSON.stringify({ status: 'INACTIVE' }) }
+      );
     },
 
-    getAssignments: async (collegeId?: string): Promise<InterviewAssignment[]> => {
-      const list = this.getStorage<InterviewAssignment[]>('assignments', MOCK_ASSIGNMENTS);
-      if (collegeId) {
-        return list.filter(a => !a.collegeId || a.collegeId === collegeId);
+    getAssignments: async (_collegeId?: string): Promise<InterviewAssignment[]> => {
+      try {
+        const response = await this.fetchAPI<{ drills: any[] }>('/admin/drills');
+        return (response.drills || []).map((d: any) => ({
+          id: d.id,
+          title: d.title,
+          sessionType: d.session_type as InterviewAssignment['sessionType'],
+          assignedByRole: d.created_by_role || 'FACULTY_MENTOR',
+          assignedByName: d.created_by_name || '',
+          assignedById: d.created_by_id,
+          collegeId: '',
+          targetScope: d.target_scope || 'ALL_STUDENTS',
+          targetDomainOrTrack: d.domain_or_topic || '',
+          targetProgramName: d.program_name,
+          interviewMode: 'TOPIC' as const,
+          domainOrTopic: d.domain_or_topic || '',
+          difficulty: d.difficulty || 'MEDIUM',
+          dueDate: d.due_date || '',
+          isMandatory: d.is_mandatory ?? true,
+          createdAt: d.created_at,
+          submissions: [],
+        }));
+      } catch {
+        return [];
       }
-      return list;
     },
 
     createAssignment: async (asg: Partial<InterviewAssignment>): Promise<InterviewAssignment> => {
-      const list = this.getStorage<InterviewAssignment[]>('assignments', MOCK_ASSIGNMENTS);
-      const newAsg: InterviewAssignment = {
-        id: `asg_${Date.now()}`,
-        title: asg.title || 'Practice Drill',
-        sessionType: asg.sessionType || 'MOCK_INTERVIEW',
-        assignedByRole: asg.assignedByRole || 'SUPER_ADMIN',
-        assignedByName: asg.assignedByName || 'Placement Cell',
-        assignedByEmail: asg.assignedByEmail,
-        assignedById: asg.assignedById,
-        collegeId: asg.collegeId || 'col-1',
-        targetScope: asg.targetScope || 'ALL_STUDENTS',
-        targetDomainOrTrack: asg.targetDomainOrTrack || 'All Batches',
-        targetProgramName: asg.targetProgramName,
-        targetProgramNames: asg.targetProgramNames,
-        targetSubProgram: asg.targetSubProgram,
-        targetDepartment: asg.targetDepartment,
-        targetDepartments: asg.targetDepartments,
-        targetStudentId: asg.targetStudentId,
-        targetStudentName: asg.targetStudentName,
-        interviewMode: asg.interviewMode || 'TOPIC',
-        domainOrTopic: asg.domainOrTopic || 'General Technical Architecture',
-        difficulty: asg.difficulty || 'MEDIUM',
-        listeningPassageId: asg.listeningPassageId,
-        customInstructions: asg.customInstructions,
-        dueDate: asg.dueDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        startTime: asg.startTime,
-        endTime: asg.endTime,
-        hasTimeWindow: Boolean(asg.startTime && asg.endTime),
-        isMandatory: asg.isMandatory ?? true,
-        createdAt: new Date().toISOString(),
-        submissions: []
-      };
-      list.unshift(newAsg);
-      this.setStorage('assignments', list);
-      return newAsg;
+      const drill = await this.fetchAPI<{ drill: any }>(
+        '/faculty/drills',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            title: asg.title || 'Practice Drill',
+            sessionType: asg.sessionType || 'MOCK_INTERVIEW',
+            targetScope: (asg.targetScope as any) || 'ALL_STUDENTS',
+            domainOrTopic: asg.domainOrTopic || asg.targetDomainOrTrack || '',
+            difficulty: asg.difficulty || 'MEDIUM',
+            dueDate: asg.dueDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            isMandatory: asg.isMandatory ?? true,
+            customInstructions: asg.customInstructions,
+          }),
+        }
+      );
+      const d = drill.drill;
+      return {
+        id: d.id,
+        title: d.title,
+        sessionType: d.session_type,
+        assignedByRole: d.created_by_role || 'FACULTY_MENTOR',
+        assignedByName: d.created_by_name || '',
+        collegeId: '',
+        targetScope: d.target_scope,
+        targetDomainOrTrack: d.domain_or_topic || '',
+        interviewMode: 'TOPIC',
+        domainOrTopic: d.domain_or_topic || '',
+        difficulty: d.difficulty,
+        dueDate: d.due_date || '',
+        isMandatory: d.is_mandatory ?? true,
+        createdAt: d.created_at,
+        submissions: [],
+      } as InterviewAssignment;
     },
 
     submitAssignment: async (assignmentId: string, submission: AssignmentSubmission): Promise<{ success: boolean; assignment: InterviewAssignment }> => {
@@ -2860,44 +3021,29 @@ class ApiClient {
       return true;
     },
 
-    getStudentAssignments: async (student: any): Promise<InterviewAssignment[]> => {
-      const list = this.getStorage<InterviewAssignment[]>('assignments', MOCK_ASSIGNMENTS);
-      return list.filter(a => {
-        if (a.targetScope === 'ALL_STUDENTS') return true;
-        if (a.targetScope === 'SPECIFIC_STUDENT') {
-          return a.targetStudentId === student.id || 
-                 a.targetStudentId === student.rollNumber || 
-                 a.targetStudentName === student.name ||
-                 Boolean(a.targetStudentId && student.email && a.targetStudentId.toLowerCase() === student.email.toLowerCase());
-        }
-        if (a.targetScope === 'MY_MENTEES') {
-          return Boolean(student.mentorName || student.mentorEmail || student.mentorId);
-        }
-        if (a.targetScope === 'PROGRAM') {
-          return student.programName === a.targetProgramName || student.track === a.targetProgramName || student.track?.startsWith(a.targetProgramName || '');
-        }
-        if (a.targetScope === 'CLASS') {
-          if (a.targetClassNames && a.targetClassNames.length > 0) {
-            return a.targetClassNames.some(cn => cn.toLowerCase() === (student.className || '').toLowerCase());
-          }
-          if (a.targetClassName) {
-            return a.targetClassName.toLowerCase() === (student.className || '').toLowerCase();
-          }
-          return false;
-        }
-        if (a.targetScope === 'DEPARTMENT') {
-          const deptMatch = student.department === a.targetDepartment || Boolean(student.department && student.department.includes(a.targetDepartment || ''));
-          if (!deptMatch) return false;
-          if (a.targetClassNames && a.targetClassNames.length > 0) {
-            return a.targetClassNames.some(cn => cn.toLowerCase() === (student.className || '').toLowerCase());
-          }
-          if (a.targetClassName) {
-            return a.targetClassName.toLowerCase() === (student.className || '').toLowerCase();
-          }
-          return true;
-        }
-        return true;
-      });
+    getStudentAssignments: async (_student?: any): Promise<InterviewAssignment[]> => {
+      try {
+        const response = await this.fetchAPI<{ drills: any[] }>('/faculty/drills/for-student');
+        return (response.drills || []).map((d: any) => ({
+          id: d.id,
+          title: d.title,
+          sessionType: d.session_type as InterviewAssignment['sessionType'],
+          assignedByRole: 'FACULTY_MENTOR',
+          assignedByName: d.created_by_name || '',
+          collegeId: '',
+          targetScope: d.target_scope || 'ALL_STUDENTS',
+          targetDomainOrTrack: d.domain_or_topic || '',
+          interviewMode: 'TOPIC' as const,
+          domainOrTopic: d.domain_or_topic || '',
+          difficulty: d.difficulty || 'MEDIUM',
+          dueDate: d.due_date || '',
+          isMandatory: d.is_mandatory ?? true,
+          createdAt: d.created_at,
+          submissions: [],
+        }));
+      } catch {
+        return [];
+      }
     },
 
     getCollegePrograms: async (collegeId = 'col-1'): Promise<DynamicProgram[]> => {
@@ -2968,6 +3114,106 @@ class ApiClient {
         return [];
       }
     }
+  };
+
+  // ── Faculty scope & drill endpoints ─────────────────────────────────────────
+  // Backed by /api/faculty/* on the real backend.
+  // Falls back gracefully if the backend is unreachable (returns empty arrays).
+  faculty = {
+    /**
+     * PROGRAM_ADMIN: grant a FACULTY_MENTOR user access to a program or subdivision.
+     * Writes a row to identity.role_assignments (scope_type='FACULTY_SCOPE').
+     */
+    grantScope: async (data: {
+      userId: string;
+      programId?: string;
+      subdivisionId?: string;
+    }): Promise<any> => {
+      const response = await this.fetchAPI<{ granted: boolean }>(
+        '/faculty/scope-assignments',
+        { method: 'POST', body: JSON.stringify(data) }
+      );
+      return response;
+    },
+
+    /**
+     * PROGRAM_ADMIN: list all scope assignments for a given faculty user.
+     */
+    getScopesForUser: async (userId: string): Promise<any[]> => {
+      try {
+        const response = await this.fetchAPI<{ scopes: any[] }>(
+          `/faculty/scope-assignments/${userId}`
+        );
+        return response.scopes || [];
+      } catch (error) {
+        console.error('getScopesForUser error:', error);
+        return [];
+      }
+    },
+
+    /**
+     * FACULTY_MENTOR: fetch the programs/subdivisions this user is authorised to target.
+     * Returns an empty array when the backend is unavailable (graceful degradation).
+     */
+    getMyScopes: async (): Promise<Array<{
+      id: string;
+      program_id: string | null;
+      program_name: string | null;
+      program_code: string | null;
+      subdivision_id: string | null;
+      subdivision_name: string | null;
+      subdivision_type: string | null;
+      batch_track: string | null;
+    }>> => {
+      try {
+        const response = await this.fetchAPI<{ scopes: any[] }>('/faculty/my-scopes');
+        return response.scopes || [];
+      } catch (error) {
+        console.warn('getMyScopes: backend unavailable, returning empty scope list:', error);
+        return [];
+      }
+    },
+
+    /**
+     * Create a drill assignment.
+     * Backend enforces scope for FACULTY_MENTOR roles — throws on unauthorised targets.
+     */
+    createDrill: async (data: {
+      title: string;
+      sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH';
+      targetScope: 'PROGRAM' | 'SUBDIVISION' | 'MY_MENTEES' | 'SPECIFIC_STUDENT' | 'ALL_STUDENTS';
+      programId?: string;
+      subdivisionId?: string;
+      targetUserId?: string;
+      interviewMode?: 'TOPIC' | 'RESUME_BASED';
+      domainOrTopic?: string;
+      difficulty?: 'EASY' | 'MEDIUM' | 'ADVANCED' | 'FAANG';
+      listeningPassageId?: string;
+      customInstructions?: string;
+      dueDate: string;
+      startTime?: string;
+      endTime?: string;
+      isMandatory?: boolean;
+    }): Promise<any> => {
+      const response = await this.fetchAPI<{ drill: any }>(
+        '/faculty/drills',
+        { method: 'POST', body: JSON.stringify(data) }
+      );
+      return response.drill;
+    },
+
+    /**
+     * FACULTY_MENTOR / PROGRAM_ADMIN: list drills created by the current user.
+     */
+    getMyDrills: async (): Promise<any[]> => {
+      try {
+        const response = await this.fetchAPI<{ drills: any[] }>('/faculty/drills');
+        return response.drills || [];
+      } catch (error) {
+        console.error('getMyDrills error:', error);
+        return [];
+      }
+    },
   };
 
   skills = {

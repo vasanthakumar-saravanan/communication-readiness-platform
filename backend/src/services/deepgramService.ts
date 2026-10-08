@@ -95,6 +95,13 @@ export async function openSession(
       const finalTranscript = session.transcript.trim() || '(no speech detected)';
       console.log(`[Deepgram] UtteranceEnd  session=${sessionId}  "${finalTranscript.slice(0, 80)}"`);
 
+      // Send final transcript to frontend before evaluation begins
+      wsManager.emit(sessionId, {
+        type: 'transcript_final',
+        text: finalTranscript,
+        turnNumber: meta.turnNumber,
+      });
+
       try {
         await onEagerEnd(finalTranscript, meta);
       } catch (err) {
@@ -118,7 +125,10 @@ export async function openSession(
 
 export function sendAudio(sessionId: string, audio: Buffer): void {
   const session = sessions.get(sessionId);
-  if (!session) return;
+  if (!session) {
+    console.warn(`[Deepgram] sendAudio called for unknown session=${sessionId}`);
+    return;
+  }
   if (!session.isOpen) {
     // Socket not yet open — buffer and flush on open
     session.pendingChunks.push(audio);

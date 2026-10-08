@@ -105,6 +105,19 @@ export interface ImpersonationSession {
   targetStudent?: StudentProfile;
 }
 
+export interface WsTurnResult {
+  transcript: string;
+  technicalScore: number;
+  communicationScore: number;
+  overallScore: number;
+  feedback: string;
+  strengths: string;
+  weaknesses: string;
+  nextDifficulty: string;
+  nextQuestionText: string;
+  conversationalResponse?: string;
+}
+
 interface AppContextType {
   isAuthenticated: boolean;
   currentUser: AuthUser | null;
@@ -149,6 +162,7 @@ interface AppContextType {
   startInterview: (type?: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION') => Promise<void>;
   submitAnswer: (answerText: string) => Promise<void>;
   endInterview: () => Promise<void>;
+  advanceTurnFromWs: (result: WsTurnResult) => void;
   completeAssessmentAwaitingEvaluation: (type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION', finalReport?: DiagnosticReport | null) => Promise<void>;
   isEvaluationPending: boolean;
   newReportNotification: { reportId: string; score: number; title: string; timestamp: number } | null;
@@ -328,6 +342,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [activeView]);
 
   const lastBackActionTimeRef = useRef<number>(0);
+
+  // Verify persisted JWT token on mount — ensures revoked or expired tokens don't persist.
+  // localStorage provides optimistic initial state; this useEffect corrects it against server truth.
+  useEffect(() => {
+    const storedToken = localStorage.getItem('auth_token');
+    if (!storedToken) {
+      setIsAuthenticated(false);
+      setCurrentUser(null);
+      return;
+    }
+    api.auth.getMe()
+      .then(async ({ user, studentId }) => {
+        const verified: AuthUser = {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role as UserRole,
+          studentId: studentId ?? undefined,
+        };
+        setCurrentUser(verified);
+        setActiveRole(user.role as UserRole);
+        setIsAuthenticated(true);
+        localStorage.setItem('auth_user', JSON.stringify(verified));
+
+        // For STUDENT role, fetch profile to restore resume and other data
+        if (user.role === 'STUDENT' && studentId) {
+          try {
+            const prof = await api.student.getProfile(studentId);
+            setStudent(prof);
+            if (prof.recentReports && prof.recentReports.length > 0) {
+              setLatestReport(prof.recentReports[0]);
+            }
+          } catch (err) {
+            console.warn('[AppContext] Profile fetch on mount failed:', err);
+          }
+        }
+      })
+      .catch(() => {
+        // Token is invalid, expired, or revoked — clear all auth state
+        setCurrentUser(null);
+        setIsAuthenticated(false);
+        setActiveRole('STUDENT');
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('auth_user');
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setActiveView = (nextView: AppView, replace: boolean = false) => {
     if (nextView === activeViewRef.current) return;
@@ -818,6 +878,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     restoreStudentCoinsToFive(studentId);
   };
 
+  // Sync student.coins from DB credit balance whenever a student logs in.
+  // DB (credit.credit_accounts) is the source of truth; localStorage is only a cache.
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== 'STUDENT') return;
+    let cancelled = false;
+    api.student.getCreditBalance()
+      .then(({ balance, hasAccount }) => {
+        if (cancelled) return;
+        if (!hasAccount) return; // no account yet — keep localStorage/default value
+        setStudent(prev => {
+          // Map DB balance to the coins gate: any positive balance = 5 usable coins
+          const newCoins = balance > 0 ? Math.min(5, balance) : 0;
+          const sKey = prev.id;
+          try {
+            localStorage.setItem(`crp_student_coins_${sKey}`, String(newCoins));
+            if (newCoins > 0) localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
+          } catch {}
+          return { ...prev, coins: newCoins };
+        });
+      })
+      .catch(() => {}); // silently degrade — localStorage value remains
+    return () => { cancelled = true; };
+  }, [currentUser?.id]);
+
   // 3-Day wait period cooldown check for individually registered students
   useEffect(() => {
     const checkIndependentCooldown = () => {
@@ -854,6 +938,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeAssignment, setActiveAssignment] = useState<InterviewAssignment | null>(null);
   const [latestReport, setLatestReport] = useState<DiagnosticReport | null>(null);
   const [isEvaluationPending, setIsEvaluationPending] = useState<boolean>(false);
+  // Holds aggregated WS-path scores so conclude + getReport can persist them to DB
+  const wsFinalScoresRef = useRef<{ overall: number; technical: number; communication: number } | null>(null);
   const [newReportNotification, setNewReportNotification] = useState<{
     reportId: string;
     score: number;
@@ -984,9 +1070,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ) => {
     const isDisq = status === 'DISQUALIFIED';
     const submission: AssignmentSubmission = {
-      studentId: student.id || 'stu-21cs1084',
-      studentName: student.name || 'Aravind Kumar',
-      studentRollNumber: student.rollNumber || '21CS1084',
+      studentId: student.id || '',
+      studentName: student.name || '',
+      studentRollNumber: student.rollNumber || '',
       score: isDisq ? 0 : score,
       sessionType,
       submittedAt: new Date().toISOString(),
@@ -1234,13 +1320,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setIsEvaluationPending(true);
 
-    // Simulate asynchronous background LLM evaluation
+    // WS path: persist final report to DB via conclude endpoint, then load from DB
+    const sessionId = interviewState.sessionId;
+    let concludedAttemptId: string | null = null;
+    if (sessionId && !providedReport && wsFinalScoresRef.current) {
+      const scores = wsFinalScoresRef.current;
+      wsFinalScoresRef.current = null; // consume once
+      try {
+        const result = await api.interview.conclude(sessionId, {
+          overallScore: scores.overall,
+          technicalScore: scores.technical,
+          communicationScore: scores.communication,
+        });
+        concludedAttemptId = result?.attemptId || null;
+        console.log('[completeAssessment] conclude succeeded, attemptId:', concludedAttemptId);
+      } catch (err) {
+        console.warn('[completeAssessment] conclude failed:', err);
+      }
+    }
+
     setTimeout(async () => {
       let report: DiagnosticReport | null = providedReport || null;
 
-      if (!report && interviewState.sessionId) {
+      // Load persisted DB report if conclude succeeded
+      if (!report && concludedAttemptId) {
         try {
-          report = await api.interview.finalize(interviewState.sessionId);
+          report = await api.interview.getReport(concludedAttemptId);
+          console.log('[completeAssessment] loaded DB report for attempt:', concludedAttemptId);
+        } catch (err) {
+          console.warn('[completeAssessment] getReport failed, falling back:', err);
+        }
+      }
+
+      if (!report && sessionId) {
+        try {
+          report = await api.interview.finalize(sessionId);
         } catch (err) {
           console.warn('Finalize error:', err);
         }
@@ -1415,6 +1529,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await completeAssessmentAwaitingEvaluation(interviewState.type);
   };
 
+  const advanceTurnFromWs = (result: WsTurnResult) => {
+    const {
+      transcript, technicalScore, communicationScore, feedback,
+      strengths, weaknesses, nextDifficulty, nextQuestionText,
+    } = result;
+
+    setInterviewState(prev => {
+      const updatedQuestions = [...prev.questions];
+      updatedQuestions[prev.turnIndex] = {
+        ...updatedQuestions[prev.turnIndex],
+        studentAnswer: transcript,
+        technicalScore,
+        communicationScore,
+        feedback,
+        strengths,
+        weaknesses,
+      };
+
+      if (!nextQuestionText) {
+        // Compute aggregate scores across all answered turns for the conclude call
+        const scored = updatedQuestions.filter(q => typeof q.technicalScore === 'number');
+        if (scored.length > 0) {
+          const avgTech = Math.round(scored.reduce((a, q) => a + (q.technicalScore || 0), 0) / scored.length);
+          const avgComm = Math.round(scored.reduce((a, q) => a + (q.communicationScore || 0), 0) / scored.length);
+          wsFinalScoresRef.current = {
+            overall: Math.round(avgTech * 0.70 + avgComm * 0.30),
+            technical: avgTech,
+            communication: avgComm,
+          };
+        }
+        setTimeout(() => endInterview(), 500);
+        return {
+          ...prev,
+          questions: updatedQuestions,
+          orbState: 'IDLE' as const,
+          liveTranscript: '',
+          isCompletedAwaitingEvaluation: true,
+        };
+      }
+
+      const nextQ: QuestionTurn = {
+        id: `q-ws-${Date.now()}`,
+        questionNumber: prev.turnIndex + 2,
+        questionText: nextQuestionText,
+        difficulty: (nextDifficulty || prev.currentDifficulty) as Difficulty,
+      };
+
+      return {
+        ...prev,
+        turnIndex: prev.turnIndex + 1,
+        currentDifficulty: (nextDifficulty || prev.currentDifficulty) as Difficulty,
+        questions: [...updatedQuestions, nextQ],
+        orbState: 'SPEAKING' as const,
+        liveTranscript: '',
+      };
+    });
+  };
+
   const recordTabSwitch = async () => {
     if (!interviewState.isActive) return;
     const newSwitches = interviewState.tabSwitches + 1;
@@ -1546,33 +1718,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const uploadResumeData = async (payload: FormData | { resumeText: string; fileName?: string } | ParsedResume): Promise<ParsedResume> => {
-    let parsed: ParsedResume;
-    try {
-      parsed = await api.student.uploadResume(student.id || 'stu-21cs1084', payload);
-    } catch {
-      if ('skills' in payload && 'projects' in payload) {
-        parsed = payload as ParsedResume;
-      } else {
-        parsed = {
-          fileName: 'Uploaded_Resume.pdf',
-          parsedAt: new Date().toISOString().split('T')[0],
-          summary: 'Full-Stack Developer with hands-on experience in Java, Spring Boot, React, and scalable cloud applications.',
-          skills: {
-            languages: ['Java', 'TypeScript', 'SQL'],
-            frameworks: ['Spring Boot', 'React', 'Tailwind CSS'],
-            databases: ['PostgreSQL', 'Redis'],
-            tools: ['Git', 'Docker']
-          },
-          projects: [
-            {
-              title: 'College Placement Readiness Engine',
-              description: 'Real-time diagnostic assessment platform',
-              techStack: ['React', 'Node.js', 'PostgreSQL']
-            }
-          ]
-        };
-      }
-    }
+    // Propagate errors to the caller (ResumeUploadModal shows the error in the UI)
+    const parsed = await api.student.uploadResume(student.id, payload);
     setStudent(prev => ({ ...prev, resume: parsed }));
     return parsed;
   };
@@ -1636,55 +1783,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const loginUser = async (email: string, password: string) => {
-    const res = await api.auth.login(email, password);
-    const user = res.user;
+    try {
+      console.log('[loginUser] Starting login for:', email);
+      const res = await api.auth.login(email, password);
+      console.log('[loginUser] Login API success, user role:', res.user.role);
+      const user = res.user;
 
-    // Backend returns minimal user info: {id, name, email, role}
-    // Additional fields are optional and will be undefined for now
-    const authUser: AuthUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role as UserRole,
-      studentId: res.studentId || undefined,
-      // Optional fields - backend doesn't provide these yet
-      collegeId: undefined,
-      collegeName: undefined,
-      programId: undefined,
-      programName: undefined,
-      department: undefined,
-      className: undefined,
-      assignedClassName: undefined,
-      assignedClasses: undefined,
-      subProgramName: undefined,
-      isIndependent: undefined,
-      permissions: undefined
-    };
+      // Backend returns minimal user info: {id, name, email, role}
+      // Additional fields are optional and will be undefined for now
+      const authUser: AuthUser = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role as UserRole,
+        studentId: res.studentId || undefined,
+        // Optional fields - backend doesn't provide these yet
+        collegeId: undefined,
+        collegeName: undefined,
+        programId: undefined,
+        programName: undefined,
+        department: undefined,
+        className: undefined,
+        assignedClassName: undefined,
+        assignedClasses: undefined,
+        subProgramName: undefined,
+        isIndependent: undefined,
+        permissions: undefined
+      };
 
-    setCurrentUser(authUser);
-    setActiveRole(user.role as UserRole);
-    setIsAuthenticated(true);
-    localStorage.setItem('auth_user', JSON.stringify(authUser));
-    setAuthModalOpen(false);
-    logger.info('AUTH', `Login: ${authUser.email} (${authUser.role})`);
+      console.log('[loginUser] Setting auth state...');
+      setCurrentUser(authUser);
+      setActiveRole(user.role as UserRole);
+      setIsAuthenticated(true);
+      localStorage.setItem('auth_user', JSON.stringify(authUser));
+      setAuthModalOpen(false);
+      console.log('[loginUser] Auth state set, modal closed');
+      logger.info('AUTH', `Login: ${authUser.email} (${authUser.role})`);
 
-    if (user.role === 'STUDENT') {
-      try {
-        const targetId = res.studentId || user.id;
-        const prof = await api.student.getProfile(targetId);
-        if (prof) {
-          setStudent(prof);
-          if (prof.recentReports && prof.recentReports.length > 0) {
-            setLatestReport(prof.recentReports[0]);
-          } else {
-            setLatestReport(null);
+      if (user.role === 'STUDENT') {
+        console.log('[loginUser] Fetching student profile...');
+        try {
+          const targetId = res.studentId || user.id;
+          const prof = await api.student.getProfile(targetId);
+          console.log('[loginUser] Profile fetched successfully');
+          if (prof) {
+            setStudent(prof);
+            if (prof.recentReports && prof.recentReports.length > 0) {
+              setLatestReport(prof.recentReports[0]);
+            } else {
+              setLatestReport(null);
+            }
           }
+        } catch (err) {
+          console.warn('[loginUser] Profile fetch error (non-fatal):', err);
+          // Profile fetch failure is non-fatal - login still succeeds
         }
-      } catch (err) {
-        console.warn('Profile fetch after login:', err);
+      } else {
+        setLatestReport(null);
       }
-    } else {
-      setLatestReport(null);
+      console.log('[loginUser] Login complete');
+    } catch (error) {
+      console.error('[loginUser] Login failed:', error);
+      throw error;
     }
   };
 
@@ -2028,6 +2188,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       startInterview,
       submitAnswer,
       endInterview,
+      advanceTurnFromWs,
       completeAssessmentAwaitingEvaluation,
       isEvaluationPending,
       newReportNotification,

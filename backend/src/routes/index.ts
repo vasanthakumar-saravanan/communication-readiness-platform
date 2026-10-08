@@ -14,6 +14,9 @@ import { performanceRouter } from './performance.routes';
 import { listeningRouter } from './listening.routes';
 import { learningRouter } from './learning.routes';
 import { authenticate } from '../middleware/authenticate';
+import { facultyRouter } from './faculty.routes';
+import { reportsRouter } from '../modules/reports/reports.routes';
+import { suggestionsRouter } from './suggestions.routes';
 
 export const router = Router();
 
@@ -30,13 +33,16 @@ router.use('/owner', authenticate, ownerRouter);
 // Protected — authenticate on every request; individual routes add authorize() as needed
 router.use('/students', authenticate, studentRouter);
 router.use('/sessions', authenticate, interviewRouter);
+router.use('/reports', authenticate, reportsRouter);
 router.use('/portals', authenticate, portalRouter);
 router.use('/mentors', authenticate, mentorRouter);
 router.use('/trainers', authenticate, trainerRouter);
 router.use('/admin', authenticate, adminRouter);
+router.use('/faculty', authenticate, facultyRouter);
 
 // Module 3 — Skills, Performance, Listening, Learning & Agent
 router.use('/skills', authenticate, skillsRouter);
 router.use('/performance', authenticate, performanceRouter);
 router.use('/listening', authenticate, listeningRouter);
 router.use('/learning', authenticate, learningRouter);
+router.use('/suggestions', authenticate, suggestionsRouter);

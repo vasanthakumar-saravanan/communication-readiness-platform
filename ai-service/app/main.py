@@ -6,6 +6,7 @@ from app.routers.interview import router as interview_router
 from app.routers.learning import router as learning_router
 from app.routers.agent import router as agent_router
 from app.routers.internal import router as internal_router
+from app.routers.resume import router as resume_router
 
 app = FastAPI(
     title=settings.app_name,
@@ -24,6 +25,7 @@ app.include_router(interview_router)
 app.include_router(learning_router)
 app.include_router(agent_router)
 app.include_router(internal_router)
+app.include_router(resume_router)
 
 
 @app.on_event("startup")

@@ -19,7 +19,7 @@ PROVIDER_PRESETS: dict[str, str] = {
 }
 
 DEFAULT_MODELS: dict[str, str] = {
-    "groq":       "openai/gpt-oss-120b",
+    "groq":       "qwen/qwen3.8-27b",
     "openai":     "gpt-4o-mini",
     "together":   "meta-llama/Llama-3-70b-chat-hf",
     "perplexity": "llama-3.1-sonar-small-128k-online",
@@ -44,8 +44,12 @@ def _build_provider() -> BaseProvider:
         return AnthropicProvider(api_key=api_key, model=model) if api_key else MockProvider()
 
     base_url = os.getenv("LLM_BASE_URL") or PROVIDER_PRESETS.get(provider_name, "")
+    # Check both generic and provider-specific key vars, then fall back to pydantic settings
     api_key = os.getenv("LLM_API_KEY") or os.getenv("GROQ_API_KEY", "")
-    model = os.getenv("LLM_MODEL") or DEFAULT_MODELS.get(provider_name, "")
+    if not api_key:
+        from app.config import settings
+        api_key = settings.groq_api_key or settings.llm_api_key
+    model = os.getenv("LLM_MODEL") or os.getenv("GROQ_MODEL", "") or DEFAULT_MODELS.get(provider_name, "")
 
     if not base_url:
         return MockProvider()

@@ -146,6 +146,143 @@ listeningRouter.put(
   }
 );
 
+// ── POST /api/listening/sessions — start a listening session (stateless) ──────
+// Returns a sessionId + story content. The sessionId is generated server-side
+// and passed back by the client on submission; no DB table required.
+
+listeningRouter.post(
+  '/sessions',
+  requireRole('STUDENT'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const storyId = req.body?.storyId as string | undefined;
+      let story: Record<string, unknown>;
+
+      if (storyId) {
+        const { rows } = await db.query(
+          `SELECT id, title, content, difficulty, metadata
+           FROM knowledge.listening_stories WHERE id = $1 AND is_active = true`,
+          [storyId]
+        );
+        if (rows.length === 0) throw new AppError(404, 'Story not found', 'NOT_FOUND');
+        story = rows[0];
+      } else {
+        // Pick a random active story
+        const { rows } = await db.query(
+          `SELECT id, title, content, difficulty, metadata
+           FROM knowledge.listening_stories WHERE is_active = true
+           ORDER BY random() LIMIT 1`
+        );
+        if (rows.length === 0) throw new AppError(404, 'No active stories available', 'NOT_FOUND');
+        story = rows[0];
+      }
+
+      const sessionId = `lis_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const meta = (story.metadata as Record<string, unknown>) ?? {};
+
+      sendSuccess(res, {
+        sessionId,
+        storyId: story.id,
+        title: story.title,
+        content: story.content,
+        difficulty: story.difficulty,
+        questions: (meta.questions as unknown[]) ?? [],
+        maxReplays: 2,
+        replaysUsed: 0,
+      }, 201);
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// ── POST /api/listening/sessions/:sessionId/submit ─────────────────────────────
+
+const submitAnswersSchema = z.object({
+  storyId: z.string().uuid().optional(),
+  answers: z.array(z.object({
+    questionId: z.string(),
+    answerText: z.string(),
+  })),
+});
+
+listeningRouter.post(
+  '/sessions/:sessionId/submit',
+  requireRole('STUDENT'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const parsed = submitAnswersSchema.safeParse(req.body);
+      if (!parsed.success) throw new AppError(422, 'answers[] required', 'VALIDATION_ERROR');
+      const { storyId, answers } = parsed.data;
+
+      // When storyId is present, look up DB story for keyword matching.
+      // When absent (resume-based local sessions), score purely on answer length / substance.
+      let questions: Record<string, unknown>[] = [];
+      if (storyId) {
+        const { rows } = await db.query(
+          `SELECT id, title, metadata FROM knowledge.listening_stories WHERE id = $1`,
+          [storyId]
+        );
+        if (rows.length > 0) {
+          const story = rows[0];
+          questions = ((story.metadata as Record<string, unknown[]>)?.questions as Record<string, unknown>[] | undefined) ?? [];
+        }
+      }
+
+      let totalScore = 0;
+      const evaluations = answers.map((ans, idx) => {
+        const q: Record<string, unknown> = questions[idx] ?? questions[0] ?? {};
+        const keywords: string[] = (q.keywords as string[]) ?? [];
+        const lowerAnswer = ans.answerText.toLowerCase();
+
+        // Baseline score depends on answer substance
+        const wordCount = ans.answerText.trim().split(/\s+/).length;
+        let score = wordCount >= 5 ? 55 : 40;
+        let matchedKeywords = 0;
+        for (const k of keywords) {
+          if (lowerAnswer.includes(k.toLowerCase())) {
+            matchedKeywords++;
+            score += 8;
+          }
+        }
+        if (wordCount >= 15) score += 5;
+        score = Math.min(98, score);
+        totalScore += score;
+
+        return {
+          questionIndex: idx,
+          questionId: ans.questionId,
+          questionText: (q.questionText as string) ?? `Question ${idx + 1}`,
+          studentAnswer: ans.answerText,
+          expectedAnswer: (q.expectedAnswer as string) ?? '',
+          score,
+          matchedKeywords,
+          feedback: score >= 80
+            ? 'Good comprehension — key points captured accurately.'
+            : 'Review the passage carefully for the specific details asked.',
+        };
+      });
+
+      const overallScore = Math.round(totalScore / Math.max(1, answers.length));
+
+      sendSuccess(res, { overallScore, evaluations, storyId: storyId ?? null });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// ── POST /api/listening/sessions/:sessionId/replay ─────────────────────────────
+// Track replay count client-side; this endpoint exists purely for contract completeness.
+
+listeningRouter.post(
+  '/sessions/:sessionId/replay',
+  requireRole('STUDENT'),
+  async (_req: AuthRequest, res: Response): Promise<void> => {
+    sendSuccess(res, { recorded: true });
+  }
+);
+
 // ── DELETE /api/listening/:id — soft delete ────────────────────────────────────
 
 listeningRouter.delete(

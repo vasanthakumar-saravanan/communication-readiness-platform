@@ -1,16 +1,80 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { 
-  ArrowLeft, 
-  Activity, 
+import {
+  ArrowLeft,
+  Activity,
   Mic,
   AlertTriangle,
   ShieldAlert,
   Ban
 } from 'lucide-react';
 
+// ── Pure SVG performance line chart (no external library) ─────────────────────
+
+interface ChartPoint { attempt: number; overallScore: number; date: string; }
+
+function PerformanceChart({ data }: { data: ChartPoint[] }) {
+  const W = 480, H = 180;
+  const PAD = { top: 24, right: 24, bottom: 44, left: 40 };
+  const chartW = W - PAD.left - PAD.right;
+  const chartH = H - PAD.top - PAD.bottom;
+  const n = data.length;
+
+  const xScale = (i: number) => n <= 1 ? chartW / 2 : (i / (n - 1)) * chartW;
+  const yScale = (v: number) => chartH - (v / 100) * chartH;
+  const linePath = `M ${data.map((d, i) => `${xScale(i)} ${yScale(d.overallScore)}`).join(' L ')}`;
+  const yTicks = [0, 25, 50, 75, 100];
+
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-lg" style={{ minWidth: 260 }}>
+        <g transform={`translate(${PAD.left},${PAD.top})`}>
+          {yTicks.map(v => (
+            <g key={v}>
+              <line x1={0} y1={yScale(v)} x2={chartW} y2={yScale(v)} stroke="#f3f4f6" strokeWidth={1} />
+              <text x={-6} y={yScale(v) + 4} textAnchor="end" fontSize={9} fill="#9ca3af">{v}</text>
+            </g>
+          ))}
+          <path d={linePath} fill="none" stroke="#171717" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          {data.map((d, i) => (
+            <g key={i}>
+              <circle cx={xScale(i)} cy={yScale(d.overallScore)} r={4} fill="#171717" />
+              <text x={xScale(i)} y={yScale(d.overallScore) - 9} textAnchor="middle" fontSize={9} fill="#171717" fontWeight="600">
+                {d.overallScore}
+              </text>
+              <text x={xScale(i)} y={chartH + 14} textAnchor="middle" fontSize={9} fill="#6b7280">
+                {`Attempt ${d.attempt}`}
+              </text>
+              {d.date ? (
+                <text x={xScale(i)} y={chartH + 26} textAnchor="middle" fontSize={8} fill="#9ca3af">{d.date}</text>
+              ) : null}
+            </g>
+          ))}
+          <line x1={0} y1={0} x2={0} y2={chartH} stroke="#e5e7eb" strokeWidth={1} />
+          <line x1={0} y1={chartH} x2={chartW} y2={chartH} stroke="#e5e7eb" strokeWidth={1} />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 export const DiagnosticReportView: React.FC = () => {
   const { latestReport, setActiveView } = useApp();
+  const [performanceHistory, setPerformanceHistory] = useState<ChartPoint[]>([]);
+
+  useEffect(() => {
+    const token = localStorage.getItem('auth_token') ?? '';
+    fetch('/api/sessions/reports', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data?.data?.reports)) {
+          setPerformanceHistory(data.data.reports);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   if (!latestReport) return null;
 
@@ -170,6 +234,16 @@ export const DiagnosticReportView: React.FC = () => {
           ))}
         </div>
       </div>
+
+      {performanceHistory.length > 0 && (
+        <div className="bg-white border border-neutral-200/90 rounded-2xl p-6 shadow-xs space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold tracking-tight text-neutral-900">Interview Performance History</h3>
+            <span className="text-xs font-mono text-neutral-400">{performanceHistory.length} attempt{performanceHistory.length !== 1 ? 's' : ''}</span>
+          </div>
+          <PerformanceChart data={performanceHistory} />
+        </div>
+      )}
 
     </div>
   );

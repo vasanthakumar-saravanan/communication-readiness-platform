@@ -44,13 +44,22 @@ let _redis: NodeRedisClient | null = null;
 let _connectPromise: Promise<unknown> | null = null;
 
 async function getRedis(): Promise<NodeRedisClient> {
+  // If no REDIS_URL configured, fail immediately — don't block on localhost:6379 retries
+  if (!env.REDIS_URL) {
+    throw new Error('REDIS_URL not configured');
+  }
+
   if (_redis && _redis.isOpen) return _redis;
 
   if (!_redis) {
     _redis = createClient({
       url: env.REDIS_URL,
       socket: {
-        reconnectStrategy: (retries: number) => Math.min(retries * 100, 3000),
+        connectTimeout: 3000,
+        reconnectStrategy: (retries: number) => {
+          if (retries >= 3) return new Error('Redis retry limit exceeded');
+          return Math.min(retries * 500, 2000);
+        },
       },
     });
 
@@ -132,21 +141,26 @@ export class SessionContextService {
 
     const turns = items.map((raw) => JSON.parse(raw) as TurnContext);
 
+    // Live schema uses (transcript_text, metadata jsonb) — no separate question/answer/difficulty cols
     const values = turns
-      .map((_, i) => `($1, $2, $${i * 4 + 3}, $${i * 4 + 4}, $${i * 4 + 5}, $${i * 4 + 6})`)
+      .map((_, i) => `($1, $2, $${i * 3 + 3}, $${i * 3 + 4}, $${i * 3 + 5})`)
       .join(', ');
 
-    const params: (string | number)[] = [sessionId, studentId];
+    const params: (string | number | object)[] = [sessionId, studentId];
     for (const t of turns) {
-      params.push(t.turn, t.question, t.answer, t.difficulty);
+      params.push(
+        t.turn,
+        t.answer, // transcript_text
+        JSON.stringify({ question_text: t.question, difficulty: t.difficulty, answer: t.answer }),
+      );
     }
 
     try {
       await db.query(
         `INSERT INTO session.interview_transcripts
-           (session_id, student_id, turn_number, question, answer, difficulty)
+           (session_id, student_id, turn_number, transcript_text, metadata)
          VALUES ${values}
-         ON CONFLICT (session_id, turn_number) DO NOTHING`,
+         ON CONFLICT ON CONSTRAINT uq_transcripts_session_turn DO NOTHING`,
         params,
       );
     } catch (err) {
@@ -265,9 +279,10 @@ export class SessionContextService {
     try {
       const state = await this.getState(sessionId);
       if (!state) return;
+      // session.assessment_sessions is the active session table; state_data holds interview state
       await db.query(
-        `UPDATE session.interview_sessions
-         SET interview_state = $1, updated_at = now()
+        `UPDATE session.assessment_sessions
+         SET state_data = $1, updated_at = now()
          WHERE id = $2`,
         [JSON.stringify(state), sessionId],
       );

@@ -44,7 +44,7 @@ class WsManager {
           return;
         }
         const chunk = (i === 0 ? '' : ' ') + words[i++];
-        this.emit(sessionId, { type: 'text_chunk', chunk });
+        this.emit(sessionId, { type: 'text_chunk', text: chunk });
         setTimeout(next, 40); // ~25 words/sec
       };
 

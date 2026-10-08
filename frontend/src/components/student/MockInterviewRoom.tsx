@@ -11,6 +11,7 @@ import {
   OpenAITTSVoice
 } from '../../services/whisperService';
 import { WhisperSettingsModal } from '../common/WhisperSettingsModal';
+import { interviewWsClient, TurnResultData } from '../../services/interviewWebSocket';
 import { 
   ShieldAlert, 
   Mic, 
@@ -47,10 +48,11 @@ declare global {
 }
 
 export const MockInterviewRoom: React.FC = () => {
-  const { 
+  const {
     student,
-    interviewState, 
+    interviewState,
     submitAnswer,
+    advanceTurnFromWs,
     activeAssignment,
     setActiveView,
     isAssignmentDisqualified,
@@ -83,9 +85,23 @@ export const MockInterviewRoom: React.FC = () => {
   const [hasWhisperKey, setHasWhisperKey] = useState(() => hasWhisperApiKey());
   const [selectedVoice, setSelectedVoice] = useState<OpenAITTSVoice>(() => getOpenAITTSVoice());
   const [isTranscribingWithWhisper, setIsTranscribingWithWhisper] = useState(false);
-  const [showQuestionText, setShowQuestionText] = useState(false);
+  const [showQuestionText, setShowQuestionText] = useState(true);
   const audioRecorderRef = useRef<AudioRecorder>(new AudioRecorder());
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // ── WS interview state ────────────────────────────────────────────────────
+  const [wsTurnNumber, setWsTurnNumber] = useState(1);
+  const [wsCurrentQuestion, setWsCurrentQuestion] = useState<string | null>(null);
+  const [wsConversationalResponse, setWsConversationalResponse] = useState('');
+  const [wsEvalResult, setWsEvalResult] = useState<TurnResultData | null>(null);
+  const [wsConfirmedTranscript, setWsConfirmedTranscript] = useState<string | null>(null);
+  const [wsInvalidTranscriptMsg, setWsInvalidTranscriptMsg] = useState<string | null>(null);
+  const [displayedQuestionText, setDisplayedQuestionText] = useState('');
+  const typewriterRef = useRef<any>(null);
+
+  const wsTurnNumberRef = useRef(1);
+  const wsTurnDifficultyRef = useRef<'EASY' | 'MEDIUM' | 'ADVANCED'>('EASY');
+  const wsCurrentQuestionRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!hasSessionStarted || isSubmitting) return;
@@ -215,6 +231,7 @@ export const MockInterviewRoom: React.FC = () => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
       if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+      if (typewriterRef.current) clearInterval(typewriterRef.current);
     };
   }, []);
 
@@ -272,6 +289,7 @@ export const MockInterviewRoom: React.FC = () => {
     }
 
     audioRecorderRef.current.clear();
+    interviewWsClient.disconnect();
   };
 
   const stopRecordingTurn = () => {
@@ -314,7 +332,7 @@ export const MockInterviewRoom: React.FC = () => {
 
     stopRecordingTurn();
 
-    let candidateAnswer = (textToSubmit || latestSpeechRef.current || currentSpeechText).trim();
+    let candidateAnswer = (textToSubmit || wsConfirmedTranscript || latestSpeechRef.current || currentSpeechText).trim();
 
     // If Whisper is configured, refine transcript from raw audio buffer
     if (hasWhisperKey && audioRecorderRef.current.isRecording()) {
@@ -338,11 +356,29 @@ export const MockInterviewRoom: React.FC = () => {
       audioRecorderRef.current.stop().catch(() => {});
     }
 
-    const finalAnswer = candidateAnswer || 
-      (hasSpokenRef.current 
-        ? `The candidate provided a verbal technical answer discussing architecture scalability, microservice communication, and database performance tradeoffs for ${currentQ.questionText.slice(0, 60)}.`
-        : "I have implemented scalable architecture solutions using reactive patterns, distributed caching, and transactional consistency.");
+    // Validate we have a real transcript before submitting
+    if (!candidateAnswer) {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      setWsInvalidTranscriptMsg('No answer was captured. Please speak again.');
+      setTimeout(() => setWsInvalidTranscriptMsg(null), 5000);
+      return;
+    }
 
+    const finalAnswer = candidateAnswer;
+
+    // WS path: send transcript to backend
+    if (interviewWsClient.isConnected()) {
+      setCurrentSpeechText('');
+      latestSpeechRef.current = '';
+      accumulatedSpeechRef.current = '';
+      currentSessionFinalRef.current = '';
+      interviewWsClient.submitTranscript(finalAnswer);
+      // isSubmittingRef stays true until turn_result event arrives via WS
+      return;
+    }
+
+    // REST fallback path (no WS)
     try {
       await submitAnswer(finalAnswer);
     } catch (err) {
@@ -441,7 +477,15 @@ export const MockInterviewRoom: React.FC = () => {
                 if (silenceDuration >= 1200 && !silenceTimerRef.current) {
                   silenceTimerRef.current = setTimeout(() => {
                     silenceTimerRef.current = null;
-                    handleExecuteSubmit(latestSpeechRef.current || currentSpeechText);
+                    if (interviewWsClient.isConnected()) {
+                      // WS path: close audio stream → Deepgram UtteranceEnd → LLM evaluation
+                      stopRecordingTurn();
+                      isSubmittingRef.current = true;
+                      setIsSubmitting(true);
+                      interviewWsClient.audioEnd();
+                    } else {
+                      handleExecuteSubmit(latestSpeechRef.current || currentSpeechText);
+                    }
                   }, 3500);
                 }
               }
@@ -589,14 +633,27 @@ export const MockInterviewRoom: React.FC = () => {
 
     await initMicrophoneStream();
 
-    if (mediaStreamRef.current && hasWhisperKey) {
-      audioRecorderRef.current.start(mediaStreamRef.current);
+    if (interviewWsClient.isConnected() && mediaStreamRef.current) {
+      // WS path: stream audio to Deepgram backend (primary path)
+      // Turn 1 always starts at EASY regardless of assigned difficulty
+      const turnDifficulty = questionNumber === 1 ? 'EASY' : (currentQ?.difficulty || 'EASY');
+      interviewWsClient.startTurn(
+        currentQ?.questionText || '',
+        turnDifficulty,
+        questionNumber,
+        (currentQ as any)?.domain || 'Technical',
+      );
+      interviewWsClient.startAudioCapture(mediaStreamRef.current);
+    } else {
+      // Fallback: browser SpeechRecognition (+ optional Whisper recorder)
+      if (mediaStreamRef.current && hasWhisperKey) {
+        audioRecorderRef.current.start(mediaStreamRef.current);
+      }
+      startSpeechRecognition();
     }
 
     isRecordingRef.current = true;
     setIsRecording(true);
-
-    startSpeechRecognition();
   };
 
   useEffect(() => {
@@ -613,6 +670,84 @@ export const MockInterviewRoom: React.FC = () => {
       };
     }
   }, []);
+
+  // ── WS event handlers ────────────────────────────────────────────────────
+  useEffect(() => {
+    interviewWsClient.setHandlers({
+      onTranscriptInterim: (text) => {
+        latestSpeechRef.current = text;
+        setCurrentSpeechText(text);
+        hasSpokenRef.current = true;
+        isLiveTranscribedRef.current = true;
+        lastVoiceActiveTimeRef.current = Date.now();
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+        }
+      },
+      onTranscriptFinal: (text) => {
+        setWsConfirmedTranscript(text);
+        setCurrentSpeechText(''); // clear interim preview once Deepgram confirms
+        setWsInvalidTranscriptMsg(null);
+      },
+      onInvalidTranscript: (message) => {
+        setWsInvalidTranscriptMsg(message);
+        setWsConfirmedTranscript(null);
+        // Reset submitting so user can speak again
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        setTimeout(() => setWsInvalidTranscriptMsg(null), 5000);
+      },
+      onTextChunk: (text) => {
+        setWsConversationalResponse(prev => prev + text);
+      },
+      onTextEnd: () => {
+        // conversational response complete — nothing extra needed
+      },
+      onTurnResult: (data: TurnResultData) => {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        setCurrentSpeechText('');
+        latestSpeechRef.current = '';
+        accumulatedSpeechRef.current = '';
+        hasSpokenRef.current = false;
+        isLiveTranscribedRef.current = false;
+        voiceDurationMsRef.current = 0;
+        lastVoiceActiveTimeRef.current = 0;
+        setWsConversationalResponse('');
+        setWsConfirmedTranscript(null);
+        setWsInvalidTranscriptMsg(null);
+        setWsEvalResult(data);
+
+        // Advance AppContext interview state — triggers the currentQ.id useEffect
+        // which calls speakQuestion for the next question
+        advanceTurnFromWs({
+          transcript: data.transcript,
+          technicalScore: data.technicalScore,
+          communicationScore: data.communicationScore,
+          overallScore: data.overallScore,
+          feedback: data.feedback,
+          strengths: data.strengths,
+          weaknesses: data.weaknesses,
+          nextDifficulty: data.nextDifficulty,
+          nextQuestionText: data.nextQuestionText,
+          conversationalResponse: data.conversationalResponse,
+        });
+      },
+      onClarification: (question) => {
+        speakQuestion(question);
+      },
+      onError: (msg) => {
+        console.error('[WS interview]', msg);
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+      },
+    });
+
+    return () => {
+      interviewWsClient.disconnect();
+    };
+  }, []); // mount/unmount only
 
   const speakWithBrowserTTS = (questionText: string, onDone: () => void) => {
     if (!('speechSynthesis' in window)) {
@@ -736,7 +871,7 @@ export const MockInterviewRoom: React.FC = () => {
     voiceDurationMsRef.current = 0;
     lastVoiceActiveTimeRef.current = 0;
     setSilenceCountdown(null);
-    setShowQuestionText(false);
+    setShowQuestionText(true);
 
     if (isMuted) {
       startRecording();
@@ -745,12 +880,46 @@ export const MockInterviewRoom: React.FC = () => {
     }
   }, [currentQ?.id, currentQ?.questionText, hasSessionStarted, isMuted]);
 
+  // Typewriter animation for question text
+  useEffect(() => {
+    if (!currentQ?.questionText || (currentQ as any)?.domain === 'LISTENING') {
+      setDisplayedQuestionText('');
+      return;
+    }
+    if (typewriterRef.current) {
+      clearInterval(typewriterRef.current);
+      typewriterRef.current = null;
+    }
+    const text = currentQ.questionText;
+    let idx = 0;
+    setDisplayedQuestionText('');
+    typewriterRef.current = setInterval(() => {
+      idx++;
+      setDisplayedQuestionText(text.slice(0, idx));
+      if (idx >= text.length) {
+        clearInterval(typewriterRef.current);
+        typewriterRef.current = null;
+      }
+    }, 22);
+    return () => {
+      if (typewriterRef.current) clearInterval(typewriterRef.current);
+    };
+  }, [currentQ?.id]);
+
   const handleStartSession = async () => {
     setIsStartingSession(true);
     try {
       requestFullscreen();
       setDrawerOpen(false);
       await initMicrophoneStream();
+
+      // Connect backend WebSocket interview server
+      const token = localStorage.getItem('auth_token');
+      const sid = interviewState.sessionId;
+      if (token && sid) {
+        interviewWsClient.connect(sid, token);
+      }
+
       setHasSessionStarted(true);
     } finally {
       setIsStartingSession(false);
@@ -774,12 +943,20 @@ export const MockInterviewRoom: React.FC = () => {
     speakQuestion(currentQ.questionText);
   };
 
-  const orbState = isSpeakingQuestion 
-    ? 'speaking' 
-    : isRecording 
-      ? 'listening' 
-      : isSubmitting 
-        ? 'thinking' 
+  const isListeningDomain = (currentQ as any)?.domain === 'LISTENING';
+  const hasFloatingText = hasSessionStarted && !!(
+    (showQuestionText && currentQ?.questionText && !isListeningDomain) ||
+    wsConfirmedTranscript ||
+    (currentSpeechText && isRecording) ||
+    wsInvalidTranscriptMsg
+  );
+
+  const orbState = isSpeakingQuestion
+    ? 'speaking'
+    : isRecording
+      ? 'listening'
+      : isSubmitting
+        ? 'thinking'
         : 'idle';
 
   if (interviewState.isCompletedAwaitingEvaluation) {
@@ -954,7 +1131,7 @@ export const MockInterviewRoom: React.FC = () => {
                 <div className="flex items-center space-x-2">
                   <h2 className="text-sm font-semibold tracking-tight text-neutral-900">Technical Mock Interview Room</h2>
                   <span className="px-2 py-0.5 text-[10px] font-medium bg-neutral-100 text-neutral-600 rounded border border-neutral-200 font-mono">
-                    Turn {questionNumber} of {totalQuestions}
+                    Turn {wsCurrentQuestion ? wsTurnNumber : questionNumber} of {totalQuestions}
                   </span>
                   <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-semibold bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200 font-mono">
                     <Zap className="w-3 h-3 mr-1" /> HANDS-FREE MODE
@@ -1222,23 +1399,101 @@ export const MockInterviewRoom: React.FC = () => {
           </div>
         ) : (
           <div className="w-full flex-1 flex flex-col items-center justify-between py-2 animate-in fade-in duration-300">
-            <div className="flex-1 flex flex-col items-center justify-center py-2 w-full">
-              <VoiceOrb 
-                state={orbState}
-                volume={audioVolume}
-                size={380}
-              />
 
-              {isTranscribingWithWhisper && (
-                <div className="inline-flex items-center space-x-2 text-xs font-mono text-neutral-700 bg-neutral-100 border border-neutral-200 px-3.5 py-1.5 rounded-full animate-pulse shadow-2xs mt-4">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-spin" />
-                  <span>Refining speech with OpenAI Whisper...</span>
+            {/* Conversational area — orb + floating text */}
+            <div className="flex-1 flex items-center justify-center w-full overflow-hidden py-4">
+              <div className="flex flex-col md:flex-row items-center justify-center w-full max-w-5xl mx-auto px-6 gap-8 md:gap-16">
+
+                {/* Orb — shifts slightly left on desktop when text is visible */}
+                <div className={`shrink-0 flex flex-col items-center gap-3 transition-transform duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${hasFloatingText ? 'md:-translate-x-8' : ''}`}>
+                  {isTranscribingWithWhisper && (
+                    <div className="inline-flex items-center space-x-2 text-xs font-mono text-neutral-700 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-full animate-pulse">
+                      <Sparkles className="w-3 h-3 text-amber-500 animate-spin" />
+                      <span>Refining with Whisper...</span>
+                    </div>
+                  )}
+                  <VoiceOrb state={orbState} volume={audioVolume} size={300} />
                 </div>
-              )}
+
+                {/* Floating text panel — right of orb (desktop) / below orb (mobile) */}
+                <div className={`
+                  w-full md:max-w-sm flex flex-col gap-5 px-2 md:px-0
+                  transition-all duration-500 ease-out
+                  ${hasFloatingText
+                    ? 'opacity-100 translate-x-0'
+                    : 'opacity-0 pointer-events-none md:-translate-x-4'}
+                `}>
+
+                  {/* AI question — typewriter reveal, no box */}
+                  {showQuestionText && currentQ?.questionText && !isListeningDomain && (
+                    <div className="space-y-2">
+                      <p className="text-[9px] font-mono uppercase tracking-widest text-neutral-400 select-none">
+                        Interviewer
+                      </p>
+                      <p className="text-lg sm:text-xl font-light text-neutral-800 leading-relaxed tracking-tight">
+                        {displayedQuestionText}
+                        {displayedQuestionText.length < (currentQ?.questionText?.length ?? 0) && (
+                          <span className="animate-pulse text-neutral-300 ml-0.5">▋</span>
+                        )}
+                      </p>
+                      <button
+                        onClick={() => setShowQuestionText(false)}
+                        className="flex items-center space-x-1 text-[10px] text-neutral-300 hover:text-neutral-500 transition-colors cursor-pointer mt-1"
+                      >
+                        <EyeOff className="w-3 h-3" />
+                        <span>hide question</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Invalid transcript — floating, no box */}
+                  {wsInvalidTranscriptMsg && (
+                    <div className="flex items-start space-x-2.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                      <p className="text-sm text-amber-700 leading-relaxed">{wsInvalidTranscriptMsg}</p>
+                    </div>
+                  )}
+
+                  {/* User speech — live interim + confirmed — no box */}
+                  {(wsConfirmedTranscript || (currentSpeechText && isRecording)) && (
+                    <div className="space-y-1.5">
+                      <p className="text-[9px] font-mono uppercase tracking-widest text-neutral-400 select-none">
+                        You
+                      </p>
+                      <p className={`text-base leading-relaxed transition-colors duration-300 ${
+                        wsConfirmedTranscript
+                          ? 'text-neutral-600 font-light'
+                          : 'text-neutral-400 font-light italic'
+                      }`}>
+                        {wsConfirmedTranscript || currentSpeechText}
+                      </p>
+                      {isSubmitting && wsConfirmedTranscript && (
+                        <div className="flex items-center space-x-1.5 pt-0.5">
+                          <Loader2 className="w-3 h-3 text-neutral-400 animate-spin" />
+                          <span className="text-[10px] font-mono text-neutral-400">Evaluating...</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+              </div>
             </div>
 
-            {!isSpeakingQuestion && (
-              <div className="flex flex-wrap items-center justify-center gap-3 pt-3">
+            {/* Bottom controls */}
+            <div className="flex flex-wrap items-center justify-center gap-3 pb-2">
+              {/* Show question button — only when question is hidden, non-listening, not speaking */}
+              {!showQuestionText && currentQ?.questionText && !isListeningDomain && !isSpeakingQuestion && (
+                <button
+                  onClick={() => setShowQuestionText(true)}
+                  className="flex items-center space-x-1.5 text-[10px] text-neutral-400 hover:text-neutral-600 transition-colors cursor-pointer"
+                >
+                  <Eye className="w-3 h-3" />
+                  <span>Show question</span>
+                </button>
+              )}
+
+              {!isSpeakingQuestion && (
                 <button
                   disabled={isSubmitting}
                   onClick={() => handleExecuteSubmit()}
@@ -1247,8 +1502,9 @@ export const MockInterviewRoom: React.FC = () => {
                   <span>{isSubmitting ? 'Evaluating...' : 'Done Speaking (Submit Answer)'}</span>
                   <ChevronRight className="w-3.5 h-3.5" />
                 </button>
-              </div>
-            )}
+              )}
+            </div>
+
           </div>
         )}
       </div>

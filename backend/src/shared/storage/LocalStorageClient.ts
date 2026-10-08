@@ -17,6 +17,11 @@ export class LocalStorageClient implements StorageClient {
     return `/${env.UPLOAD_DIR}/${destinationPath}`;
   }
 
+  async download(storagePath: string): Promise<Buffer> {
+    const fullPath = path.join(this.baseDir, storagePath.replace(`/${env.UPLOAD_DIR}/`, ''));
+    return await fs.readFile(fullPath);
+  }
+
   getUrl(storagePath: string): string {
     return storagePath;
   }

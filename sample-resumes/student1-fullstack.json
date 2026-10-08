@@ -1,0 +1,89 @@
+{
+  "name": "Real Student One",
+  "email": "student.real01@example.com",
+  "phone": "+1 (555) 123-4567",
+  "location": "Bangalore, India",
+  "domain": "Full Stack Web Development",
+
+  "summary": "Full Stack Developer with 2+ years of experience building scalable web applications using React, Node.js, and Spring Boot. Passionate about clean code, responsive design, and modern development practices.",
+
+  "education": [
+    {
+      "degree": "B.Tech in Computer Science",
+      "institution": "Test University",
+      "year": "2024",
+      "gpa": "8.5/10"
+    }
+  ],
+
+  "skills": {
+    "languages": ["JavaScript", "TypeScript", "Java", "Python", "HTML", "CSS"],
+    "frontend": ["React", "Next.js", "Redux", "Tailwind CSS", "Material-UI", "React Query"],
+    "backend": ["Node.js", "Express", "Spring Boot", "RESTful APIs", "GraphQL"],
+    "databases": ["PostgreSQL", "MongoDB", "MySQL", "Redis"],
+    "devops": ["Docker", "Git", "GitHub Actions", "AWS (EC2, S3)", "Nginx"],
+    "tools": ["VS Code", "Postman", "Figma", "Jira"]
+  },
+
+  "projects": [
+    {
+      "title": "E-Commerce Platform",
+      "duration": "Jan 2024 - Apr 2024",
+      "description": "Built a full-stack e-commerce application with product catalog, cart management, and payment integration",
+      "technologies": ["React", "Node.js", "PostgreSQL", "Stripe", "Docker"],
+      "highlights": [
+        "Implemented JWT-based authentication with role-based access control",
+        "Designed responsive UI with Tailwind CSS supporting mobile and desktop",
+        "Integrated Stripe payment gateway with webhook handling",
+        "Optimized database queries reducing page load time by 40%"
+      ]
+    },
+    {
+      "title": "Real-Time Chat Application",
+      "duration": "Sep 2023 - Dec 2023",
+      "description": "Developed a WebSocket-based real-time chat app with group messaging and file sharing",
+      "technologies": ["React", "Socket.io", "Express", "MongoDB", "Redis"],
+      "highlights": [
+        "Implemented real-time messaging using Socket.io with 100+ concurrent users",
+        "Built Redis-based session management for scalability",
+        "Created RESTful API with Express for user and message management",
+        "Deployed using Docker Compose with Nginx reverse proxy"
+      ]
+    },
+    {
+      "title": "Task Management Dashboard",
+      "duration": "May 2023 - Aug 2023",
+      "description": "Created a Kanban-style task management tool with drag-and-drop functionality",
+      "technologies": ["Next.js", "Spring Boot", "PostgreSQL", "AWS S3"],
+      "highlights": [
+        "Implemented drag-and-drop interface using React DnD library",
+        "Built RESTful backend with Spring Boot and JPA",
+        "Added file attachment feature with AWS S3 integration",
+        "Achieved 95+ Lighthouse performance score"
+      ]
+    }
+  ],
+
+  "experience": [
+    {
+      "role": "Full Stack Developer Intern",
+      "company": "Tech Solutions Pvt Ltd",
+      "duration": "Jun 2023 - Aug 2023",
+      "responsibilities": [
+        "Developed new features for customer portal using React and Node.js",
+        "Fixed 20+ bugs and improved application performance",
+        "Collaborated with senior developers on code reviews",
+        "Participated in daily standups and sprint planning"
+      ]
+    }
+  ],
+
+  "certifications": [
+    "AWS Certified Cloud Practitioner",
+    "MongoDB Certified Developer"
+  ],
+
+  "github": "https://github.com/realstudent01",
+  "linkedin": "https://linkedin.com/in/realstudent01",
+  "portfolio": "https://realstudent01.dev"
+}

@@ -39,6 +39,9 @@ export const FacultyMentorPortal: React.FC = () => {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'MENTEES' | 'DRILLS'>('MENTEES');
   const [assignModalOpen, setAssignModalOpen] = useState(false);
+  // authorizedScopes: programs/subdivisions this faculty may target when creating drills.
+  // Fetched from /api/faculty/my-scopes on mount. Empty = no backend scope configured yet.
+  const [authorizedScopes, setAuthorizedScopes] = useState<any[]>([]);
 
   useBackHandler(createModalOpen, () => setCreateModalOpen(false));
   useBackHandler(Boolean(inspectStudentId), () => setInspectStudentId(null));
@@ -59,11 +62,13 @@ export const FacultyMentorPortal: React.FC = () => {
   const fetchMentees = async () => {
     try {
       setLoading(true);
-      const [list, progs] = await Promise.all([
+      const [list, progs, scopes] = await Promise.all([
         api.mentors.getMyStudents().then(students =>
           students.length > 0 ? students : api.admin.getMentorMentees()
         ).catch(() => api.admin.getMentorMentees()),
-        api.college.getPrograms(currentUser?.collegeId || 'col-1')
+        api.college.getPrograms(currentUser?.collegeId || 'col-1'),
+        // Load faculty-authorized scopes from backend (scope enforcement)
+        api.faculty.getMyScopes().catch(() => [] as any[]),
       ]);
       if (list) {
         setMentees(list);
@@ -79,6 +84,10 @@ export const FacultyMentorPortal: React.FC = () => {
             }
           }
         }
+      }
+      // scopes: list of { program_name, subdivision_name, ... } the faculty is authorised for
+      if (Array.isArray(scopes)) {
+        setAuthorizedScopes(scopes);
       }
     } catch (err: any) {
       console.warn('Error loading mentees or programs:', err);
@@ -599,6 +608,13 @@ export const FacultyMentorPortal: React.FC = () => {
           menteesList={mentees}
           studentsList={mentees}
           targetStudent={targetStudentForAssign}
+          authorizedPrograms={
+            authorizedScopes.length > 0
+              ? authorizedScopes
+                  .filter(s => s.program_name)
+                  .map(s => s.program_name as string)
+              : undefined
+          }
         />
       )}
 

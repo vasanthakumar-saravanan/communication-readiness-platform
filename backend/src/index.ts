@@ -6,6 +6,7 @@ import { Events, UserRegisteredPayload } from './shared/events/events';
 import { db } from './shared/db/pool';
 import { registerModule3Handlers } from './shared/events/module3Handlers';
 import { recoverDeadRuns } from './agents/agentRunner';
+import { createInterviewWsServer } from './routes/interviewWs';
 
 // Module 3 event handlers
 registerModule3Handlers();
@@ -33,5 +34,8 @@ const server = app.listen(env.PORT, '0.0.0.0', async () => {
     console.error('[startup] recoverDeadRuns error:', err);
   }
 });
+
+// Attach WebSocket interview server to the same HTTP server
+createInterviewWsServer(server);
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)));

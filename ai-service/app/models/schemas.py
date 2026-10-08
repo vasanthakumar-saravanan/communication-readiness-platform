@@ -26,7 +26,8 @@ class QuestionGenerationRequest(BaseModel):
     projects: list[ProjectSummary] = Field(default_factory=list)
     previous_turns: list[PreviousTurn] = Field(default_factory=list)
     difficulty: str = "EASY"
-    domain: str | None = None  # PEP domain, if applicable
+    domain: str | None = None
+    resume_context: str | None = None  # pre-built resume summary for personalization
 
 
 class GeneratedQuestionResponse(BaseModel):
@@ -70,6 +71,34 @@ class ListeningEvaluationResponse(BaseModel):
     accuracy_level: str  # HIGH | MEDIUM | LOW
     feedback: str
     missed_key_points: list[str] = Field(default_factory=list)
+
+
+# ── Evaluate Response Text (SSE streaming endpoint) ────────────────────────────
+
+class RecentTurnItem(BaseModel):
+    turn: int
+    question: str
+    answer: str
+    difficulty: str = "EASY"
+
+
+class EvaluateResponseTextMetadata(BaseModel):
+    question_text: str
+    difficulty: str = "EASY"
+    turn_number: int = 1
+    session_id: str = ""
+    student_id: str = ""
+    domain: str | None = None
+    interview_state: dict[str, Any] = Field(default_factory=dict)
+    short_term_context: list[str] = Field(default_factory=list)
+    recent_turns: list[RecentTurnItem] = Field(default_factory=list)
+    current_rubric: dict[str, Any] = Field(default_factory=dict)
+    resume: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvaluateResponseTextRequest(BaseModel):
+    transcript: str
+    metadata: EvaluateResponseTextMetadata
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────

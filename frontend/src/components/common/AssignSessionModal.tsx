@@ -43,6 +43,12 @@ export interface AssignSessionModalProps {
   lockProgramScope?: boolean;
   lockDepartmentScope?: boolean;
   lockClassScope?: boolean;
+  /**
+   * When provided (non-empty), restricts the PROGRAM scope dropdown to only these
+   * program names. Used by FacultyMentorPortal to enforce backend-defined scopes.
+   * If undefined or empty, all programs are shown (existing behaviour).
+   */
+  authorizedPrograms?: string[];
 }
 
 export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
@@ -61,7 +67,8 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
   targetStudent,
   lockProgramScope,
   lockDepartmentScope,
-  lockClassScope
+  lockClassScope,
+  authorizedPrograms,
 }) => {
   useBackHandler(isOpen, onClose);
 
@@ -95,6 +102,14 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
 
   const [programs, setPrograms] = useState<DynamicProgram[]>([]);
   const [selectedProgNames, setSelectedProgNames] = useState<string[]>([]);
+
+  // When authorizedPrograms is provided, restrict the visible program list.
+  // This enforces the backend-defined scope for FACULTY_MENTOR roles.
+  const displayedPrograms = programs.filter(p =>
+    !authorizedPrograms || authorizedPrograms.length === 0
+      ? true
+      : authorizedPrograms.includes(p.name)
+  );
 
   const [selectedDepartments, setSelectedDepartments] = useState<string[]>(
     defaultDepartment ? [defaultDepartment] : ['Computer Science & Engineering']
@@ -214,10 +229,10 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
   };
 
   const selectAllPrograms = () => {
-    if (selectedProgNames.length === programs.length) {
-      setSelectedProgNames([programs[0]?.name || '']);
+    if (selectedProgNames.length === displayedPrograms.length) {
+      setSelectedProgNames([displayedPrograms[0]?.name || '']);
     } else {
-      setSelectedProgNames(programs.map(p => p.name));
+      setSelectedProgNames(displayedPrograms.map(p => p.name));
     }
   };
 
@@ -248,8 +263,12 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
     }
 
     if (targetScope === 'PROGRAM') {
-      if (programs.length === 0) {
-        setError('No institutional programs available yet. Please select Department-Wise or College-Wide.');
+      if (displayedPrograms.length === 0) {
+        setError(
+          authorizedPrograms && authorizedPrograms.length > 0
+            ? 'None of your authorised programs are configured yet. Contact your Program Admin.'
+            : 'No institutional programs available yet. Please select Department-Wise or College-Wide.'
+        );
         return;
       }
       if (selectedProgNames.length === 0) {
@@ -586,7 +605,7 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
                     <span className="text-xs font-semibold">Program Students</span>
                   </div>
                   <span className={`text-[10px] ${targetScope === 'PROGRAM' ? 'text-neutral-300' : 'text-neutral-400'}`}>
-                    {programs.length > 0 ? `${programs.length} configured` : 'Configure in Programs tab'}
+                    {displayedPrograms.length > 0 ? `${displayedPrograms.length} available` : (authorizedPrograms && authorizedPrograms.length > 0 ? 'No scoped programs' : 'Configure in Programs tab')}
                   </span>
                 </button>
 
@@ -624,25 +643,30 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
               </div>
             )}
 
-            {/* Multi-Select Programs */}
+            {/* Multi-Select Programs — restricted to authorizedPrograms when set */}
             {targetScope === 'PROGRAM' && !isProgramLocked && (
               <div className="p-4 bg-neutral-50 rounded-xl border border-neutral-200/90 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="block text-xs font-semibold text-neutral-800">
                     Select Target Programs ({selectedProgNames.length} selected)
+                    {authorizedPrograms && authorizedPrograms.length > 0 && (
+                      <span className="ml-2 px-1.5 py-0.5 text-[10px] font-mono rounded bg-amber-100 text-amber-900 border border-amber-200">
+                        Scope-restricted
+                      </span>
+                    )}
                   </label>
-                  {programs.length > 1 && (
+                  {displayedPrograms.length > 1 && (
                     <button
                       type="button"
                       onClick={selectAllPrograms}
                       className="text-[11px] text-blue-600 hover:text-blue-800 font-medium cursor-pointer"
                     >
-                      {selectedProgNames.length === programs.length ? 'Deselect Extra' : 'Select All Programs'}
+                      {selectedProgNames.length === displayedPrograms.length ? 'Deselect Extra' : 'Select All'}
                     </button>
                   )}
                 </div>
 
-                {programs.length === 0 ? (
+                {displayedPrograms.length === 0 ? (
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs space-y-2">
                     <p className="text-amber-900 font-semibold">
                       No institutional dynamic programs configured yet.
@@ -670,7 +694,7 @@ export const AssignSessionModal: React.FC<AssignSessionModalProps> = ({
                 ) : (
                   <div className="space-y-3">
                     <div className="flex flex-wrap gap-2">
-                      {programs.map(p => {
+                      {displayedPrograms.map(p => {
                         const isSelected = selectedProgNames.includes(p.name);
                         return (
                           <button

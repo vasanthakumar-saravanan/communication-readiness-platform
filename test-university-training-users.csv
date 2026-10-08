@@ -1,0 +1,58 @@
+##
+## test-university-training-users.csv
+## Institution: Test University
+## Format: role, name, email, program, subdivision/track, department, notes
+##
+## This file documents the test users to be created for verifying the
+## Faculty/Trainer scoped assignment workflow.
+##
+## STAFF USERS (created via POST /api/admin/users or /api/owner/*)
+## ────────────────────────────────────────────────────────────────────────────
+## role,name,email,authorised_programs,authorised_subdivisions,notes
+PROGRAM_ADMIN,Dr. Priya Nair (HOPE Admin),hope.admin@testuniversity.edu,HOPE,HOPE_ELITE|HOPE_NON_ELITE,Program Admin scoped to HOPE program. Can create drills for both HOPE Elite and HOPE Non-Elite subdivisions.
+PROGRAM_ADMIN,Prof. Karthik Raj (PEP Admin),pep.admin@testuniversity.edu,PEP,FULL_STACK|CYBER_SECURITY|AI_ML|DATA_SCIENCE|CLOUD_COMPUTING,Program Admin scoped to PEP program. Can create drills for all PEP domain subdivisions.
+FACULTY_MENTOR,Dr. Anitha Suresh (Multi-scope Faculty),faculty.multi@testuniversity.edu,PEP,FULL_STACK|CYBER_SECURITY,Faculty Mentor authorised for two PEP subdivisions. Should be BLOCKED from creating drills targeting AI_ML or DATA_SCIENCE.
+FACULTY_MENTOR,Mr. Bala Murugan (Single-scope Faculty),faculty.single@testuniversity.edu,PEP,FULL_STACK,Faculty Mentor authorised for PEP Full Stack ONLY. Should be BLOCKED from all other subdivisions.
+
+##
+## STUDENT USERS (created via POST /api/auth/register or batch import)
+## Format: name, email, program, track/subdivision, department, roll_number, batch_year
+## ────────────────────────────────────────────────────────────────────────────
+##
+## Note: 'program' column matches org.programs.name; 'track' maps to org.batches.track
+##       or org.subdivisions.name for PEP domain-level targeting.
+##
+name,email,program,track,department,roll_number,batch_year
+Aravind Kumar,aravind.kumar@testuniversity.edu,HOPE,HOPE_ELITE,Computer Science & Engineering,22CS1001,2026
+Deepika Rajan,deepika.rajan@testuniversity.edu,HOPE,HOPE_ELITE,Information Technology,22IT1002,2026
+Harish Balaji,harish.balaji@testuniversity.edu,HOPE,HOPE_NON_ELITE,Computer Science & Engineering,22CS1003,2026
+Kavitha Meenakshi,kavitha.m@testuniversity.edu,HOPE,HOPE_NON_ELITE,Electronics & Communication,22EC1004,2026
+Logesh Sekar,logesh.sekar@testuniversity.edu,PEP,FULL_STACK,Computer Science & Engineering,22CS2001,2026
+Nithya Priya,nithya.priya@testuniversity.edu,PEP,FULL_STACK,Information Technology,22IT2002,2026
+Pravin Anand,pravin.anand@testuniversity.edu,PEP,FULL_STACK,Computer Science & Engineering,22CS2003,2026
+Ranjith Selvan,ranjith.selvan@testuniversity.edu,PEP,CYBER_SECURITY,Computer Science & Engineering,22CS2004,2026
+Sowmya Kannan,sowmya.kannan@testuniversity.edu,PEP,CYBER_SECURITY,Information Technology,22IT2005,2026
+Thilaga Veni,thilaga.veni@testuniversity.edu,PEP,AI_ML,AI & Data Science,22AIDS2001,2026
+Udhaya Kumar,udhaya.kumar@testuniversity.edu,PEP,AI_ML,Computer Science & Engineering,22CS2007,2026
+Vasanth Raj,vasanth.raj@testuniversity.edu,PEP,DATA_SCIENCE,AI & Data Science,22AIDS2002,2026
+Yazhini Murugan,yazhini.m@testuniversity.edu,PEP,DATA_SCIENCE,Information Technology,22IT2008,2026
+Zubair Ahmed,zubair.ahmed@testuniversity.edu,PEP,CLOUD_COMPUTING,Computer Science & Engineering,22CS2009,2026
+
+##
+## SCOPE GRANT SCRIPTS (for wiring up faculty scopes via POST /api/faculty/scope-assignments)
+## Run after creating staff accounts to define what each faculty can target.
+##
+## Faculty: Dr. Anitha Suresh (Multi-scope) → PEP Full Stack + Cyber Security
+##   POST /api/faculty/scope-assignments { userId: "<anitha_user_id>", programId: "<pep_program_id>", subdivisionId: "<fullstack_subdivision_id>" }
+##   POST /api/faculty/scope-assignments { userId: "<anitha_user_id>", programId: "<pep_program_id>", subdivisionId: "<cybersecurity_subdivision_id>" }
+##
+## Faculty: Mr. Bala Murugan (Single-scope) → PEP Full Stack only
+##   POST /api/faculty/scope-assignments { userId: "<bala_user_id>", programId: "<pep_program_id>", subdivisionId: "<fullstack_subdivision_id>" }
+##
+## VERIFICATION CHECKS:
+##   - Anitha creates drill targeting PEP Full Stack  → SHOULD SUCCEED (200)
+##   - Anitha creates drill targeting PEP AI&ML       → SHOULD FAIL (403 FACULTY_SCOPE_DENIED)
+##   - Bala creates drill targeting PEP Full Stack    → SHOULD SUCCEED (200)
+##   - Bala creates drill targeting PEP Cyber Security → SHOULD FAIL (403 FACULTY_SCOPE_DENIED)
+##   - Hope Admin creates drill for HOPE_ELITE        → SHOULD SUCCEED (PROGRAM_ADMIN — no restriction)
+##   - PEP Admin creates drill for any PEP domain     → SHOULD SUCCEED (PROGRAM_ADMIN — no restriction)
