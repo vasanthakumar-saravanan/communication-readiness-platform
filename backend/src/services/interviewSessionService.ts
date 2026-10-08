@@ -74,7 +74,7 @@ export async function createAttemptAndSession(
     if (abandoned.length > 0) {
       const abandonedIds = abandoned.map((row) => row.id);
       await client.query(
-        `UPDATE session.assessment_sessions SET state = 'ABANDONED', last_activity_at = now()
+        `UPDATE session.assessment_sessions SET state = 'TERMINATED', last_activity_at = now()
          WHERE attempt_id = ANY($1::uuid[])`,
         [abandonedIds]
       );
@@ -98,7 +98,7 @@ export async function createAttemptAndSession(
     const { rows: sessionRows } = await client.query<{ id: string }>(
       `INSERT INTO session.assessment_sessions
          (attempt_id, current_sequence_no, state, last_activity_at)
-       VALUES ($1, 0, 'STARTED', now())
+       VALUES ($1, 0, 'ACTIVE', now())
        RETURNING id`,
       [attemptId]
     );
@@ -326,7 +326,7 @@ export async function completeAttempt(
       ]
     );
     await client.query(
-      `UPDATE session.assessment_sessions SET state='CONCLUDED', last_activity_at=now() WHERE id=$1`,
+      `UPDATE session.assessment_sessions SET state='COMPLETED', last_activity_at=now() WHERE id=$1`,
       [sessionId]
     );
     await client.query(
