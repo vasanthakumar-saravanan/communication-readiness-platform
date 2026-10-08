@@ -8,6 +8,7 @@ import { eventBus } from '../shared/events/eventBus';
 import { Events, AttemptCompletedPayload } from '../shared/events/events';
 import { env } from '../config/env';
 import { sessionContextService } from '../services/sessionContextService';
+import { getCoins, spendCoin } from '../services/coinService';
 
 export const interviewRouter = Router();
 
@@ -73,6 +74,15 @@ interviewRouter.post('/', async (req: AuthRequest, res: Response): Promise<void>
 
     const student = await getStudentContext(studentId);
 
+    // Students are charged server-side for a new interview. Existing in-progress
+    // sessions are resumed without charging again. Staff-created attempts are free.
+    if (req.user!.role === 'STUDENT') {
+      const wallet = await getCoins(studentId);
+      if (wallet.coins < 1) {
+        throw new AppError(402, 'You have no coins left. Coins are restored by your administrator.', 'INSUFFICIENT_COINS');
+      }
+    }
+
     // Use the first active assessment as the template
     const { rows: assessmentRows } = await db.query(
       `SELECT id FROM assessment.assessments WHERE is_active = true ORDER BY created_at LIMIT 1`
@@ -132,12 +142,31 @@ interviewRouter.post('/', async (req: AuthRequest, res: Response): Promise<void>
       client.release();
     }
 
+    let coinsRemaining: number | undefined;
+    if (req.user!.role === 'STUDENT') {
+      try {
+        coinsRemaining = await spendCoin(studentId, attemptId);
+      } catch (coinErr) {
+        // Do not leave a free IN_PROGRESS attempt behind when the charge fails.
+        await db.query(
+          `UPDATE assessment.assessment_attempts SET status='ABANDONED', completed_at=now()
+           WHERE id=$1 AND status='IN_PROGRESS'`,
+          [attemptId],
+        );
+        await db.query(
+          `UPDATE session.assessment_sessions SET state='TERMINATED', last_activity_at=now() WHERE id=$1`,
+          [sessionId],
+        );
+        throw coinErr;
+      }
+    }
+
     console.log(
       `[interview] Session started sessionId=${sessionId} attemptId=${attemptId} ` +
-      `studentId=${studentId} goal="${goal}"`
+      `studentId=${studentId} goal="${goal}"${coinsRemaining === undefined ? '' : ` coinsRemaining=${coinsRemaining}`}`
     );
 
-    sendSuccess(res, { sessionId, attemptId, goal }, 201);
+    sendSuccess(res, { sessionId, attemptId, goal, ...(coinsRemaining === undefined ? {} : { coinsRemaining }) }, 201);
   } catch (err) {
     sendError(res, err);
   }
