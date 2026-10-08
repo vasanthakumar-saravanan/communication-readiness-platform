@@ -7,6 +7,7 @@ import { AuthRequest } from '../middleware/authenticate';
 import { eventBus } from '../shared/events/eventBus';
 import { Events, AttemptCompletedPayload } from '../shared/events/events';
 import { env } from '../config/env';
+import { sessionContextService } from '../services/sessionContextService';
 
 export const interviewRouter = Router();
 
@@ -280,7 +281,13 @@ interviewRouter.get('/:sessionId/next-question', async (req: AuthRequest, res: R
         skills: skills.slice(0, 5), // Increased from 3 to 5
         projects: projects.slice(0, 3), // Increased from 2 to 3
         resume_context: resumeText, // NEW: Full resume context
-        previous_turns: [], // TODO: populate from turn history
+        previous_turns: (await sessionContextService.getTurns(sessionId, 5)).map((t) => ({
+          question_text: t.question,
+          student_answer: t.answer,
+          difficulty: t.difficulty,
+          technical_score: t.technical_score ?? null,
+          feedback: t.summary ?? null,
+        })),
         difficulty,
         domain: 'Technical'
       })
@@ -300,7 +307,8 @@ interviewRouter.get('/:sessionId/next-question', async (req: AuthRequest, res: R
       question_text: question.question_text,
       difficulty: question.difficulty,
       category: question.category,
-      turn_number: turnNumber
+      turn_number: turnNumber,
+      key_points: Array.isArray((question as any).key_points) ? (question as any).key_points : []
     });
   } catch (err) {
     sendError(res, err);
@@ -378,6 +386,17 @@ interviewRouter.post('/:sessionId/submit-answer', async (req: AuthRequest, res: 
     const technicalScore = Math.round(evaluation.technical_score * 10);
     const communicationScore = Math.round(evaluation.communication_score * 10);
 
+    // Persist the evaluated turn into the same server-side context used by live follow-ups.
+    await sessionContextService.appendTurn(sessionId, {
+      turn: turnNumber,
+      question: question_text,
+      answer: student_answer,
+      summary: [evaluation.feedback, evaluation.weaknesses].filter(Boolean).join(' '),
+      difficulty,
+      technical_score: technicalScore,
+      ts: new Date().toISOString(),
+    });
+
     // Update session sequence
     await db.query(
       `UPDATE session.assessment_sessions
@@ -386,8 +405,8 @@ interviewRouter.post('/:sessionId/submit-answer', async (req: AuthRequest, res: 
       [session.current_sequence_no + 1, sessionId]
     );
 
-    // Determine if complete (3 turns)
-    const isCompleted = turnNumber >= 3;
+    // Use configured server-side session length, never a hardcoded three-turn cap.
+    const isCompleted = turnNumber >= env.MAX_QUESTIONS_PER_SESSION;
 
     sendSuccess(res, {
       isCompleted,
@@ -474,7 +493,21 @@ interviewRouter.post('/:id/conclude', async (req: AuthRequest, res: Response): P
       [attemptId]
     );
 
-    // Store assessment report with the provided scores
+    // For a live interview, aggregate scores from server-owned turn results.
+    // Client-supplied aggregate scores are only a legacy fallback when no live state exists.
+    const liveState = await sessionContextService.getState(sessionId);
+    const liveTurns = liveState?.turn_results ?? [];
+    const derivedTechnical = liveTurns.length
+      ? Math.round(liveTurns.reduce((sum, t) => sum + t.technicalScore, 0) / liveTurns.length)
+      : technicalScore ?? null;
+    const derivedCommunication = liveTurns.length
+      ? Math.round(liveTurns.reduce((sum, t) => sum + t.communicationScore, 0) / liveTurns.length)
+      : communicationScore ?? null;
+    const derivedOverall = liveTurns.length
+      ? Math.round(liveTurns.reduce((sum, t) => sum + t.overallScore, 0) / liveTurns.length)
+      : overallScore;
+
+    // Store assessment report with server-derived scores when available
     await db.query(
       `INSERT INTO performance.assessment_reports
          (attempt_id, student_id, assessment_version, scoring_version,
@@ -487,13 +520,13 @@ interviewRouter.post('/:id/conclude', async (req: AuthRequest, res: Response): P
       [
         attemptId,
         attempt.student_id,
-        technicalScore ?? null,
-        communicationScore ?? null,
+        derivedTechnical,
+        derivedCommunication,
         listeningScore ?? null,
-        overallScore,
+        derivedOverall,
         JSON.stringify({
-          TECHNICAL: technicalScore,
-          COMMUNICATION: communicationScore,
+          TECHNICAL: derivedTechnical,
+          COMMUNICATION: derivedCommunication,
           LISTENING: listeningScore,
         }),
       ]
@@ -521,9 +554,9 @@ interviewRouter.post('/:id/conclude', async (req: AuthRequest, res: Response): P
       programId:         attempt.program_id,
       batchId:           attempt.batch_id,
       subdivisionId:     attempt.subdivision_id,
-      overallScore,
-      technicalScore:    technicalScore ?? null,
-      communicationScore: communicationScore ?? null,
+      overallScore:       derivedOverall,
+      technicalScore:    derivedTechnical,
+      communicationScore: derivedCommunication,
       listeningScore:    listeningScore ?? null,
       goal:              resolvedGoal,
     };
