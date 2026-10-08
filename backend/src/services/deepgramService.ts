@@ -14,9 +14,9 @@ export interface AudioStartMeta {
 interface DeepgramSession {
   socket: any;
   transcript: string;
-  triggered: boolean; // prevent double-trigger on UtteranceEnd
+  triggered: boolean;
   meta: AudioStartMeta;
-  pendingChunks: Buffer[]; // audio buffered before socket opens
+  pendingChunks: Buffer[];
   isOpen: boolean;
 }
 
@@ -29,7 +29,6 @@ export async function openSession(
   meta: AudioStartMeta,
   onEagerEnd: EagerEndCallback,
 ): Promise<void> {
-  // Close any stale session first
   const existing = sessions.get(sessionId);
   if (existing) {
     try { existing.socket.sendCloseStream({}); } catch {}
@@ -37,15 +36,14 @@ export async function openSession(
   }
 
   if (!env.DEEPGRAM_API_KEY) {
-    console.warn('[Deepgram] DEEPGRAM_API_KEY not set — session skipped');
+    console.warn(`[Deepgram] DEEPGRAM_API_KEY not set — session skipped session=${sessionId}`);
     return;
   }
 
   const deepgram = new DeepgramClient({ apiKey: env.DEEPGRAM_API_KEY });
-
   let socket: any;
+
   try {
-    // Cast to any — ConnectArgs requires Authorization but SDK fills it from apiKey at runtime
     socket = await deepgram.listen.v1.connect({
       model: 'nova-3',
       language: 'en',
@@ -54,20 +52,27 @@ export async function openSession(
       endpointing: 300,
       smart_format: ListenV1SmartFormat.True,
       vad_events: ListenV1VadEvents.True,
-      Authorization: env.DEEPGRAM_API_KEY, // required by type, filled by SDK auth
+      filler_words: 'true',
+      Authorization: env.DEEPGRAM_API_KEY,
     } as any);
   } catch (err) {
-    console.error(`[Deepgram] connect failed  session=${sessionId}:`, err);
+    console.error(`[Deepgram] connect failed session=${sessionId}:`, err);
     return;
   }
 
-  const session: DeepgramSession = { socket, transcript: '', triggered: false, meta, pendingChunks: [], isOpen: false };
+  const session: DeepgramSession = {
+    socket,
+    transcript: '',
+    triggered: false,
+    meta,
+    pendingChunks: [],
+    isOpen: false,
+  };
   sessions.set(sessionId, session);
 
   socket.on('open', () => {
     session.isOpen = true;
-    console.log(`[Deepgram] session opened  session=${sessionId}`);
-    // Flush any audio chunks that arrived before the socket opened
+    console.log(`[Deepgram] session opened session=${sessionId}`);
     for (const chunk of session.pendingChunks) {
       try { socket.sendMedia(chunk); } catch {}
     }
@@ -88,14 +93,16 @@ export async function openSession(
         text: msg.is_final ? session.transcript : words,
         isFinal: Boolean(msg.is_final),
       });
-    } else if (msg?.type === 'UtteranceEnd') {
+      return;
+    }
+
+    if (msg?.type === 'UtteranceEnd') {
       if (session.triggered) return;
       session.triggered = true;
 
-      const finalTranscript = session.transcript.trim() || '(no speech detected)';
-      console.log(`[Deepgram] UtteranceEnd  session=${sessionId}  "${finalTranscript.slice(0, 80)}"`);
+      const finalTranscript = session.transcript.trim();
+      console.log(`[Deepgram] UtteranceEnd session=${sessionId} "${finalTranscript.slice(0, 120)}"`);
 
-      // Send final transcript to frontend before evaluation begins
       wsManager.emit(sessionId, {
         type: 'transcript_final',
         text: finalTranscript,
@@ -111,41 +118,36 @@ export async function openSession(
   });
 
   socket.on('error', (err: unknown) => {
-    console.error(`[Deepgram] error  session=${sessionId}:`, err);
+    console.error(`[Deepgram] error session=${sessionId}:`, err);
   });
 
   socket.on('close', () => {
     sessions.delete(sessionId);
-    console.log(`[Deepgram] session closed  session=${sessionId}`);
+    console.log(`[Deepgram] session closed session=${sessionId}`);
   });
 
-  // Must call connect() after registering handlers — SDK returns a start-closed socket
   socket.connect();
 }
 
 export function sendAudio(sessionId: string, audio: Buffer): void {
   const session = sessions.get(sessionId);
-  if (!session) {
-    console.warn(`[Deepgram] sendAudio called for unknown session=${sessionId}`);
-    return;
-  }
+  if (!session) return;
+
   if (!session.isOpen) {
-    // Socket not yet open — buffer and flush on open
     session.pendingChunks.push(audio);
     return;
   }
+
   try {
     session.socket.sendMedia(audio);
   } catch (err) {
-    console.error(`[Deepgram] sendAudio error  session=${sessionId}:`, err);
+    console.error(`[Deepgram] sendAudio error session=${sessionId}:`, err);
   }
 }
 
 export function closeSession(sessionId: string): void {
   const session = sessions.get(sessionId);
   if (!session) return;
-  try {
-    session.socket.sendCloseStream({});
-  } catch {}
+  try { session.socket.sendCloseStream({}); } catch {}
   sessions.delete(sessionId);
 }
