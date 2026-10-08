@@ -25,12 +25,20 @@ export interface TurnResultData {
   nextQuestionText: string;
   contextSummary: string;
   conversationalResponse: string;
-  audioMetrics: {
-    paceWpm: number;
-    fillerCount: number;
-    fluencyScore: number;
-    clarityScore: number;
+  audioMetrics?: {
+    paceWpm: number | null;
+    paceLabel?: string | null;
+    fillerCount?: number;
+    fillerBreakdown?: Record<string, number>;
+    fluencyScore?: number;
+    clarityScore?: number;
+    pauseCount?: number | null;
+    longestPauseSec?: number | null;
+    responseLatencySec?: number | null;
   };
+  scoreBreakdown?: Record<string, unknown>;
+  keyPoints?: { covered: string[]; missed: string[] };
+  report?: unknown;
 }
 
 export interface InterviewWsHandlers {
