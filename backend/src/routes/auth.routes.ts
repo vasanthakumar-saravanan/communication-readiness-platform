@@ -11,6 +11,7 @@ import { eventBus } from '../shared/events/eventBus';
 import { Events, UserRegisteredPayload } from '../shared/events/events';
 import { UserRole } from '../shared/types/roles';
 import { AuthUser } from '../shared/types/auth';
+import { lockedForSeconds, recordFailure, clearFailures } from '../shared/security/loginThrottle';
 
 export const authRouter = Router();
 
@@ -114,8 +115,14 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
     return;
   }
   const { email, password } = parsed.data;
+  const ip = req.ip ?? 'unknown';
 
   try {
+    const lockSeconds = lockedForSeconds(ip, email);
+    if (lockSeconds > 0) {
+      throw new AppError(429, `Too many failed attempts. Try again in ${Math.ceil(lockSeconds / 60)} minute(s).`, 'TOO_MANY_ATTEMPTS');
+    }
+
     const { rows } = await db.query<{
       id: string; name: string; email: string; role: UserRole;
       password_hash: string; token_version: number; status: string;
@@ -127,12 +134,14 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
 
     // Always run bcrypt regardless of whether the email exists — prevents timing-based
     // user enumeration (a found email would otherwise be ~100ms slower than a missing one).
-    const DUMMY_HASH = '$2a$10$invalidhashpadding..................................';
+    const DUMMY_HASH = bcrypt.hashSync('constant-dummy-password', 10);
     const hashToCheck = rows.length > 0 ? rows[0].password_hash : DUMMY_HASH;
     const passwordMatch = await bcrypt.compare(password, hashToCheck);
     if (rows.length === 0 || !passwordMatch) {
+      recordFailure(ip, email);
       throw new AppError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
     }
+    clearFailures(ip, email);
 
     const user = rows[0];
     if (user.status === 'SUSPENDED') {
