@@ -17,6 +17,7 @@ import { authenticate } from '../middleware/authenticate';
 import { facultyRouter } from './faculty.routes';
 import { reportsRouter } from '../modules/reports/reports.routes';
 import { suggestionsRouter } from './suggestions.routes';
+import { coinsRouter } from './coins.routes';
 
 export const router = Router();
 
@@ -46,3 +47,4 @@ router.use('/performance', authenticate, performanceRouter);
 router.use('/listening', authenticate, listeningRouter);
 router.use('/learning', authenticate, learningRouter);
 router.use('/suggestions', authenticate, suggestionsRouter);
+router.use('/coins', authenticate, coinsRouter);
