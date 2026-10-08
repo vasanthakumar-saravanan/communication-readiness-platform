@@ -7,7 +7,15 @@ class WsManager {
     this.connections.set(sessionId, ws);
   }
 
-  unregister(sessionId: string): void {
+  unregister(sessionId: string, ws?: WebSocket): void {
+    const current = this.connections.get(sessionId);
+    if (!ws || current === ws) this.connections.delete(sessionId);
+  }
+
+  close(sessionId: string, code = 1000, reason = 'Session ended'): void {
+    const ws = this.connections.get(sessionId);
+    if (!ws) return;
+    try { ws.close(code, reason); } catch {}
     this.connections.delete(sessionId);
   }
 
